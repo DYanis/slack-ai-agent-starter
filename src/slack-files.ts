@@ -14,6 +14,17 @@ const maxFileBytes = 8 * 1024 * 1024;
 const maxMetadataBytes = 256 * 1024;
 const fileBudgetMs = 8000;
 
+function isSharedInConversation(file: Record<string, unknown>, channelId: string): boolean {
+  const shares = asRecord(file.shares);
+  const hasShare = [shares?.public, shares?.private].some((visibility) => {
+    const entries = asRecord(visibility)?.[channelId];
+    return Array.isArray(entries) && entries.some((entry) => typeof asRecord(entry)?.ts === "string");
+  });
+  return hasShare || [file.channels, file.groups, file.ims].some(
+    (ids) => Array.isArray(ids) && ids.includes(channelId),
+  );
+}
+
 async function readBytes(response: Response, limit: number): Promise<Buffer> {
   if (!response.body) throw new Error("slack_file_body_missing");
   const reader = response.body.getReader();
@@ -79,9 +90,7 @@ export function createSlackFileLoader(token: string, request: typeof fetch = fet
           file.is_external === true || file.filetype === "remote" ||
           typeof file.size !== "number" || !Number.isSafeInteger(file.size) ||
           file.size < 0 || file.size > remaining ||
-          ![file.channels, file.groups, file.ims].some(
-            (ids) => Array.isArray(ids) && ids.includes(channelId),
-          )) throw new Error("slack_file_unavailable");
+          !isSharedInConversation(file, channelId)) throw new Error("slack_file_unavailable");
 
       const download = file.url_private_download ?? file.url_private;
       if (typeof download !== "string") throw new Error("slack_file_url_missing");

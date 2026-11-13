@@ -61,6 +61,9 @@ test("accepts an unnamed Slack snippet and uses a safe fallback for file names",
 test("rejects files outside the conversation and download addresses that could misuse the token", async () => {
   for (const change of [
     { ims: ["DOTHER"] }, { id: "FOTHER" }, { mode: "external" }, { is_external: true },
+    { ims: undefined, shares: { private: { DOTHER: [{ ts: "1700000000.000001" }] } } },
+    { ims: undefined, shares: { private: { [channelId]: [] } } },
+    { ims: undefined, shares: { private: { [channelId]: [null, {}] } } },
     { filetype: "remote" },
     { url_private_download: "https://files.slack.com.example.invalid/files-pri/TEXAMPLE-FEXAMPLE/x" },
     { url_private_download: "https://files.slack.com@other.invalid/files-pri/TEXAMPLE-FEXAMPLE/x" },
@@ -203,7 +206,13 @@ test("signed Slack attachments reach the selected model and replies stay in the 
   ]);
 
   const load = createSlackFileLoader(token, async (url) =>
-    String(url) === metadataUrl ? fileResponse({ channels: ["CEXAMPLE"] }) : new Response("hello"));
+    String(url) === metadataUrl ? fileResponse({
+      ims: undefined,
+      shares: {
+        public: { CEXAMPLE: [{ ts: "1700000000.000002", thread_ts: threadTs }] },
+        private: { [channelId]: [{ ts: "1700000000.000002", thread_ts: threadTs }] },
+      },
+    }) : new Response("hello"));
   const prompts = [];
   const agent = createAgent(config.model, async (url, options) => {
     assert.equal(url, "https://api.openai.com/v1/responses");
