@@ -21,16 +21,22 @@ const slackDownloadOrigin = "https://downloads.slack-edge.com";
 const downloadRedirects = new Set([301, 302, 303, 307, 308]);
 const maxDownloadRedirects = 3;
 
-function isAttachedToMessage(file: Record<string, unknown>, message: SlackFileMessage): boolean {
+function fileShare(file: Record<string, unknown>, message: SlackFileMessage): "attached" | "check_dm" | "unconfirmed" {
   const shares = asRecord(file.shares);
-  return [shares?.public, shares?.private].some((visibility) => {
-    const entries = asRecord(visibility)?.[message.channelId];
-    return Array.isArray(entries) && entries.some((entry) => {
-      const share = asRecord(entry);
-      return share?.ts === message.messageTs &&
-        (share.thread_ts === undefined || share.thread_ts === message.threadTs);
-    });
-  });
+  const entries = [asRecord(shares?.public)?.[message.channelId], asRecord(shares?.private)?.[message.channelId]];
+  if (entries.some((items) => Array.isArray(items) && items.some((entry) => {
+    const share = asRecord(entry);
+    return share?.ts === message.messageTs &&
+      (share.thread_ts === undefined || share.thread_ts === message.threadTs);
+  }))) return "attached";
+  // Slack sometimes lists DM membership without a detailed share on the message.
+  if (message.channelId.startsWith("D") && entries.every((item) => item === undefined) &&
+      Array.isArray(file.ims) && file.ims.includes(message.channelId)) return "check_dm";
+  return "unconfirmed";
+}
+
+function isSlackRateLimit(data: Record<string, unknown> | undefined): boolean {
+  return data?.ok === false && (data.error === "ratelimited" || data.error === "rate_limited");
 }
 
 function isSlackFileUrl(url: URL, id: string): boolean {
@@ -64,6 +70,7 @@ async function readBytes(response: Response, limit: number): Promise<Buffer> {
 export function createSlackFileLoader(token: string, request: typeof fetch = fetch): LoadSlackFiles {
   const headers = { authorization: `Bearer ${token}` };
   let blockedUntil = 0;
+  let dmLookupBlockedUntil = 0;
 
   function deferFiles(response: Response): never {
     blockedUntil = Math.max(blockedUntil, performance.now() + retryAfter(response.headers) * 1000);
@@ -103,10 +110,43 @@ export function createSlackFileLoader(token: string, request: typeof fetch = fet
     }
   }
 
+  async function dmAttachmentIds(message: SlackFileMessage, signal: AbortSignal): Promise<Set<string>> {
+    signal.throwIfAborted();
+    if (performance.now() < dmLookupBlockedUntil) throw new Error("slack_files_rate_limited");
+    const url = new URL("https://slack.com/api/conversations.replies");
+    url.search = new URLSearchParams({
+      channel: message.channelId, ts: message.threadTs, oldest: message.messageTs, latest: message.messageTs,
+      inclusive: "true", limit: "2",
+    }).toString();
+    const response = await request(url, { headers, redirect: "error", signal });
+    const data = response.ok
+      ? asRecord(JSON.parse((await readBytes(response, maxMetadataBytes)).toString("utf8")))
+      : undefined;
+    if (!response.ok) void response.body?.cancel().catch(() => {});
+    if (response.status === 429 || isSlackRateLimit(data)) {
+      dmLookupBlockedUntil = Math.max(dmLookupBlockedUntil, performance.now() + retryAfter(response.headers) * 1000);
+      throw new Error("slack_files_rate_limited");
+    }
+    const current = data?.ok === true && Array.isArray(data.messages) ? data.messages.map(asRecord).find((item) =>
+      item?.type === "message" && item.ts === message.messageTs && item.hidden !== true &&
+      (item.subtype === undefined || item.subtype === "file_share") &&
+      (item.channel === undefined || item.channel === message.channelId) &&
+      (item.thread_ts === undefined || item.thread_ts === message.threadTs)) : undefined;
+    const ids = new Set<string>();
+    if (Array.isArray(current?.files)) {
+      for (const file of current.files) {
+        const id = asRecord(file)?.id;
+        if (typeof id === "string" && slackFileId.test(id)) ids.add(id);
+      }
+    }
+    return ids;
+  }
+
   return async (message, fileIds, signal) => {
     if (fileIds.length > maxSlackFiles) throw new Error("slack_file_count_limit");
     const fileSignal = AbortSignal.any([signal, AbortSignal.timeout(fileBudgetMs)]);
     const files: SlackFile[] = [];
+    let dmFileIds: Set<string> | undefined;
     let remaining = maxFileBytes;
     for (const id of fileIds) {
       if (!slackFileId.test(id)) throw new Error("invalid_slack_file_id");
@@ -114,9 +154,7 @@ export function createSlackFileLoader(token: string, request: typeof fetch = fet
       info.searchParams.set("file", id);
       const response = await get(info, fileSignal);
       const data = asRecord(JSON.parse((await readBytes(response, maxMetadataBytes)).toString("utf8")));
-      if (data?.ok === false && (data.error === "ratelimited" || data.error === "rate_limited")) {
-        deferFiles(response);
-      }
+      if (isSlackRateLimit(data)) deferFiles(response);
       if (data?.ok === false && data.error === "missing_scope") {
         throw new Error("slack_files_missing_scope");
       }
@@ -126,7 +164,11 @@ export function createSlackFileLoader(token: string, request: typeof fetch = fet
           file.is_external === true || file.filetype === "remote" ||
           typeof file.size !== "number" || !Number.isSafeInteger(file.size) ||
           file.size < 0 || file.size > remaining) throw new Error("slack_file_unavailable");
-      if (!isAttachedToMessage(file, message)) throw new Error("slack_file_share_unconfirmed");
+      const share = fileShare(file, message);
+      if (share === "check_dm") dmFileIds ??= await dmAttachmentIds(message, fileSignal);
+      if (share !== "attached" && (share !== "check_dm" || !dmFileIds?.has(id))) {
+        throw new Error("slack_file_share_unconfirmed");
+      }
 
       const download = file.url_private_download ?? file.url_private;
       if (typeof download !== "string") throw new Error("slack_file_url_missing");

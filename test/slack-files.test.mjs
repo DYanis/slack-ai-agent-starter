@@ -17,6 +17,7 @@ const fileMessage = { channelId, messageTs: "1700000000.000002", threadTs: "1700
 const fileId = "FEXAMPLE";
 const fileUrl = "https://files.slack.com/files-pri/TEXAMPLE-FEXAMPLE/download/example.txt";
 const metadataUrl = "https://slack.com/api/files.info?file=FEXAMPLE";
+const repliesUrl = "https://slack.com/api/conversations.replies";
 
 function fileResponse(file = {}) {
   return Response.json({
@@ -62,11 +63,11 @@ test("accepts an unnamed Slack snippet and uses a safe fallback for file names",
 
 test("rejects files not attached to this message and download addresses that could misuse the token", async () => {
   for (const change of [
-    { shares: undefined, ims: [channelId] },
-    { shares: { private: { DOTHER: [{ ts: fileMessage.messageTs }] } }, ims: [channelId] },
+    { shares: undefined, ims: ["DOTHER"] },
     { shares: { private: { [channelId]: [{ ts: "1700000000.000003" }] } }, ims: [channelId] },
     { shares: { private: { [channelId]: [{ ts: fileMessage.messageTs, thread_ts: fileMessage.messageTs }] } } },
-    { shares: { private: { [channelId]: [] } } },
+    { shares: { private: { [channelId]: [] } }, ims: [channelId] },
+    { shares: { private: { [channelId]: null } }, ims: [channelId] },
     { shares: { private: { [channelId]: [null, {}] } } },
     { id: "FOTHER" }, { mode: "external" }, { is_external: true },
     { filetype: "remote" },
@@ -87,6 +88,95 @@ test("rejects files not attached to this message and download addresses that cou
     await assert.rejects(() => load(fileMessage, [fileId], new AbortController().signal),
       /slack_file_unavailable|slack_file_share_unconfirmed|slack_file_url_untrusted/);
     assert.equal(requests, 1);
+  }
+});
+
+test("checks the exact DM message once for files with only DM share metadata", async () => {
+  const otherFileId = "FOTHER";
+  const otherFileUrl = fileUrl.replace(fileId, otherFileId);
+  const signal = new AbortController().signal;
+  for (const message of [fileMessage, { ...fileMessage, threadTs: fileMessage.messageTs }]) {
+    const requests = [];
+    const load = createSlackFileLoader(token, async (url, options) => {
+      requests.push(String(url));
+      if (url.pathname === "/api/files.info") {
+        const id = url.searchParams.get("file");
+        assert([fileId, otherFileId].includes(id));
+        return fileResponse({ id, shares: undefined, ims: [channelId],
+          url_private_download: id === fileId ? fileUrl : otherFileUrl });
+      }
+      if (url.pathname === "/api/conversations.replies") {
+        assert.equal(url.origin + url.pathname, repliesUrl);
+        assert.deepEqual(Object.fromEntries(url.searchParams), {
+          channel: channelId, ts: message.threadTs, oldest: message.messageTs, latest: message.messageTs,
+          inclusive: "true", limit: "2",
+        });
+        assert.equal(options.headers.authorization, `Bearer ${token}`);
+        assert.equal(options.redirect, "error");
+        const attachmentMessage = {
+          type: "message", subtype: "file_share", ts: message.messageTs,
+          files: [{ id: fileId }, { id: otherFileId }, { id: "FNOTREQUESTED" }],
+        };
+        const messages = message.threadTs === message.messageTs ? [attachmentMessage] : [
+          { type: "message", ts: message.threadTs },
+          { ...attachmentMessage, thread_ts: message.threadTs },
+        ];
+        return Response.json({ ok: true, messages });
+      }
+      assert([fileUrl, otherFileUrl].includes(String(url)));
+      return new Response("hello");
+    });
+    const files = await load(message, [fileId, otherFileId], signal);
+    assert.deepEqual(files.map((file) => file.bytes.toString()), ["hello", "hello"]);
+    assert.equal(requests.filter((url) => url.startsWith(repliesUrl)).length, 1);
+    assert.equal(requests.length, 5);
+  }
+});
+
+test("does not download a DM file when the exact message no longer contains it", async () => {
+  const attached = { type: "message", ts: fileMessage.messageTs, files: [{ id: fileId }] };
+  const signal = new AbortController().signal;
+  for (const data of [
+    { ok: false, error: "thread_not_found" },
+    { ok: true, messages: [] },
+    { ok: true, messages: [{ ...attached, ts: fileMessage.threadTs }, { ...attached, files: [{ id: "FOTHER" }] }] },
+    { ok: true, messages: [{ ...attached, hidden: true }] },
+    { ok: true, messages: [{ ...attached, channel: "DOTHER" }] },
+    { ok: true, messages: [{ ...attached, thread_ts: fileMessage.messageTs }] },
+    { ok: true, messages: [{ ...attached, subtype: "tombstone" }] },
+  ]) {
+    const load = createSlackFileLoader(token, async (url) => {
+      if (String(url) === metadataUrl) return fileResponse({ shares: undefined, ims: [channelId] });
+      assert.equal(url.origin + url.pathname, repliesUrl);
+      return Response.json(data);
+    });
+    await assert.rejects(() => load(fileMessage, [fileId], signal), /slack_file_share_unconfirmed/);
+  }
+  const channel = { ...fileMessage, channelId: "CEXAMPLE" };
+  const channelLoader = createSlackFileLoader(token, async (url) => {
+    assert.equal(String(url), metadataUrl);
+    return fileResponse({ shares: undefined, channels: [channel.channelId], ims: [channel.channelId] });
+  });
+  await assert.rejects(() => channelLoader(channel, [fileId], signal), /slack_file_share_unconfirmed/);
+});
+
+test("a rate limit on the DM lookup does not block a confirmed file share", async () => {
+  const signal = new AbortController().signal;
+  for (const status of [200, 429]) {
+    let lookups = 0;
+    let detailed = false;
+    const load = createSlackFileLoader(token, async (url) => {
+      if (String(url) === metadataUrl) return detailed ? fileResponse() : fileResponse({ shares: undefined, ims: [channelId] });
+      if (String(url) === fileUrl) return new Response("hello");
+      assert.equal(url.origin + url.pathname, repliesUrl);
+      lookups++;
+      return Response.json({ ok: false, error: "ratelimited" }, { status, headers: { "retry-after": "60" } });
+    });
+    await assert.rejects(() => load(fileMessage, [fileId], signal), /slack_files_rate_limited/);
+    await assert.rejects(() => load(fileMessage, [fileId], signal), /slack_files_rate_limited/);
+    assert.equal(lookups, 1);
+    detailed = true;
+    assert.equal((await load(fileMessage, [fileId], signal))[0].bytes.toString(), "hello");
   }
 });
 
@@ -265,13 +355,17 @@ test("signed Slack attachments reach the selected model and replies stay in the 
     { eventId: "EvFileOnly", fileIds: [fileId] }, { eventId: "EvMention", fileIds: [fileId] },
   ]);
 
-  const load = createSlackFileLoader(token, async (url) =>
-    String(url) === metadataUrl ? fileResponse({
-      shares: {
-        public: { CEXAMPLE: [{ ts: "1700000000.000002", thread_ts: threadTs }] },
-        private: { [channelId]: [{ ts: "1700000000.000002" }] },
-      },
-    }) : new Response("hello"));
+  const load = createSlackFileLoader(token, async (url) => {
+    if (String(url) === metadataUrl) return fileResponse({
+      shares: { public: { CEXAMPLE: [{ ts: fileMessage.messageTs, thread_ts: threadTs }] } },
+      ims: [channelId],
+    });
+    if (url.origin + url.pathname === repliesUrl) return Response.json({
+      ok: true, messages: [{ type: "message", ts: fileMessage.messageTs, thread_ts: threadTs, files: [{ id: fileId }] }],
+    });
+    assert.equal(String(url), fileUrl);
+    return new Response("hello");
+  });
   const prompts = [];
   const agent = createAgent(config.model, async (url, options) => {
     assert.equal(url, "https://api.openai.com/v1/responses");
