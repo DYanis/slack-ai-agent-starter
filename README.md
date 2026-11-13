@@ -2,7 +2,7 @@
 
 A TypeScript starter for building a Slack AI agent on Railway. It runs one HTTP service and background worker with a private PostgreSQL database. The included agent returns a fixed setup reply so you can verify Slack delivery before connecting a model.
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/i64Eez)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/slack-ai-agent-starter)
 
 ## Set up an agent
 
@@ -21,7 +21,7 @@ A TypeScript starter for building a Slack AI agent on Railway. It runs one HTTP 
 | `SLACK_SIGNING_SECRET` | The signing secret for that app. Store it as a Railway secret. |
 | `SLACK_BOT_TOKEN` | The installed bot token for that app and workspace. Store it as a Railway secret. |
 | `WORKER_CONCURRENCY` | Concurrent work across separate threads. Default 4, range 1 to 8. |
-| `PORT` | Railway supplies this port. It defaults to 3000 locally. |
+| `PORT` | Defaults to 3000 and matches the template's public HTTP port. |
 
 ## Run locally
 
