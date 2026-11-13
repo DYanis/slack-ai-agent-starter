@@ -32,7 +32,7 @@ test("uses the signed message file ID and downloads from the matching Slack host
   const load = createSlackFileLoader(token, async (url, options) => {
     urls.push(String(url));
     assert.equal(options.headers.authorization, `Bearer ${token}`);
-    assert.equal(options.redirect, "error");
+    assert.equal(options.redirect, String(url) === metadataUrl ? "error" : "manual");
     assert.equal(options.signal.aborted, false);
     return String(url) === metadataUrl ? fileResponse() : new Response("hello");
   });
@@ -85,16 +85,69 @@ test("rejects files outside the conversation and download addresses that could m
   }
 });
 
-test("redirects and missing scope cannot deliver file content", async () => {
+test("only bounded Slack download redirects are followed", async () => {
+  const sameFilePath = "/files-pri/TEXAMPLE-FEXAMPLE/example.txt";
+  const sameFileUrl = "https://files.slack.com" + sameFilePath;
+  const cdnUrl = "https://downloads.slack-edge.com/private-file?signature=fixture";
   const urls = [];
   const load = createSlackFileLoader(token, async (url, options) => {
     urls.push(String(url));
-    assert.equal(options.redirect, "error");
-    return String(url) === metadataUrl ? fileResponse() : Response.redirect("https://example.invalid");
+    if (String(url) === metadataUrl) {
+      assert.equal(options.redirect, "error");
+      return fileResponse();
+    }
+    assert.equal(options.redirect, "manual");
+    assert.equal(new Headers(options.headers).get("authorization"),
+      String(url) === cdnUrl ? null : `Bearer ${token}`);
+    if (String(url) === fileUrl) return new Response(null, { status: 302, headers: { location: sameFilePath } });
+    if (String(url) === sameFileUrl) return Response.redirect(cdnUrl);
+    assert.equal(String(url), cdnUrl);
+    return new Response("hello");
   });
-  await assert.rejects(() => load(channelId, [fileId], new AbortController().signal),
+  const signal = new AbortController().signal;
+  const [file] = await load(channelId, [fileId], signal);
+  assert.equal(file.bytes.toString(), "hello");
+  assert.deepEqual(urls, [metadataUrl, fileUrl, sameFileUrl, cdnUrl]);
+
+  for (const target of [
+    "https://example.invalid", "https://downloads.slack-edge.com.example.invalid/file",
+    "https://files.slack.com/files-pri/TEXAMPLE-FOTHER/download/example.txt",
+    "http://downloads.slack-edge.com/file", "https://user@downloads.slack-edge.com/file",
+  ]) {
+    const blocked = createSlackFileLoader(token, async (url) => {
+      if (String(url) === metadataUrl) return fileResponse();
+      assert.equal(String(url), fileUrl);
+      return Response.redirect(target);
+    });
+    await assert.rejects(() => blocked(channelId, [fileId], signal), /slack_file_url_untrusted/);
+  }
+
+  let hops = 0;
+  const loop = createSlackFileLoader(token, async (url) => {
+    if (String(url) === metadataUrl) return fileResponse();
+    hops++;
+    return Response.redirect(fileUrl);
+  });
+  await assert.rejects(() => loop(channelId, [fileId], signal), /slack_file_redirect_unavailable/);
+  assert.equal(hops, 4);
+  const cdnLoop = createSlackFileLoader(token, async (url, options) => {
+    if (String(url) === metadataUrl) return fileResponse();
+    if (String(url) === fileUrl) return Response.redirect(cdnUrl);
+    assert.equal(String(url), cdnUrl);
+    assert.equal(new Headers(options.headers).has("authorization"), false);
+    return Response.redirect(fileUrl);
+  });
+  await assert.rejects(() => cdnLoop(channelId, [fileId], signal), /slack_file_url_untrusted/);
+});
+
+test("metadata redirects and missing scope cannot deliver file content", async () => {
+  const redirected = createSlackFileLoader(token, async (url, options) => {
+    assert.equal(String(url), metadataUrl);
+    assert.equal(options.redirect, "error");
+    return Response.redirect("https://example.invalid");
+  });
+  await assert.rejects(() => redirected(channelId, [fileId], new AbortController().signal),
     /slack_file_unavailable/);
-  assert.deepEqual(urls, [metadataUrl, fileUrl]);
   const noScope = createSlackFileLoader(token, async (url) => {
     assert.equal(String(url), metadataUrl);
     return Response.json({ ok: false, error: "missing_scope" });
