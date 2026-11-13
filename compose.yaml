@@ -1,0 +1,31 @@
+services:
+  agent:
+    build: .
+    environment:
+      PORT: "3000"
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD to a random hex value}@postgres:5432/agent
+      SLACK_APP_ID: ${SLACK_APP_ID:?Set the app ID}
+      SLACK_TEAM_ID: ${SLACK_TEAM_ID:?Set the workspace ID}
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:?Set the signing secret}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:?Set the installed bot token}
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    stop_grace_period: 35s
+  postgres:
+    image: postgres:17.11
+    environment:
+      POSTGRES_DB: agent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD to a random hex value}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "agent"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+volumes:
+  postgres-data:
