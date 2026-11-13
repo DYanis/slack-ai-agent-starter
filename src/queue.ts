@@ -43,7 +43,7 @@ export class Queue {
     }
   }
 
-  async initialize(schema: string, installation: Installation): Promise<void> {
+  async initialize(schema: string, installation: Pick<Installation, "appId" | "teamId">): Promise<void> {
     await this.transaction(async (client) => {
       await client.query("SELECT pg_advisory_xact_lock(714391432, 1)");
       await client.query(schema);
@@ -137,7 +137,7 @@ export class Queue {
     return this.transaction(async (client) => {
       await client.query("SELECT 1 FROM agent_runtime FOR UPDATE");
       const result = await client.query<{ status: string }>(
-        `UPDATE slack_jobs SET reply_text = $3, file_ids = NULL,
+        `UPDATE slack_jobs SET reply_text = $3, input_text = NULL, user_id = NULL, file_ids = NULL,
              status = CASE WHEN r.slack_blocked_until > r.checked_at THEN 'pending' ELSE 'sending' END,
              run_after = GREATEST(run_after, r.slack_blocked_until),
              attempt_id = CASE WHEN r.slack_blocked_until <= r.checked_at THEN attempt_id END,
@@ -166,8 +166,7 @@ export class Queue {
             run_after = GREATEST(run_after, throttle.deadline),
             attempt_id = NULL, lease_until = NULL, last_error = 'slack_rate_limited',
             finished_at = CASE WHEN send_attempts >= $4 THEN clock_timestamp() END,
-            input_text = CASE WHEN send_attempts < $4 THEN input_text END,
-            user_id = CASE WHEN send_attempts < $4 THEN user_id END,
+            input_text = NULL, user_id = NULL,
             reply_text = CASE WHEN send_attempts < $4 THEN $5 END, file_ids = NULL
           FROM throttle WHERE event_id = $1 AND attempt_id = $2
             AND status IN ('sending', 'uncertain')
@@ -202,9 +201,9 @@ export class Queue {
            run_after = clock_timestamp(),
            finished_at = CASE WHEN status = 'sending' OR (reply_text IS NULL AND generation_attempts >= $1)
                               THEN clock_timestamp() END,
-           input_text = CASE WHEN status = 'working' AND (reply_text IS NOT NULL OR generation_attempts < $1)
+           input_text = CASE WHEN status = 'working' AND reply_text IS NULL AND generation_attempts < $1
                              THEN input_text END,
-           user_id = CASE WHEN status = 'working' AND (reply_text IS NOT NULL OR generation_attempts < $1)
+           user_id = CASE WHEN status = 'working' AND reply_text IS NULL AND generation_attempts < $1
                           THEN user_id END,
            reply_text = CASE WHEN status = 'working' THEN reply_text END,
            file_ids = CASE WHEN status = 'working' AND reply_text IS NULL AND generation_attempts < $1

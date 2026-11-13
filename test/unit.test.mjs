@@ -5,10 +5,10 @@ import { request } from "node:http";
 import { test } from "node:test";
 import { readConfig } from "../dist/config.js";
 import { createHttpServer } from "../dist/http.js";
-import { isSignedRequest, parseSlackEvent, postSlackReply } from "../dist/slack.js";
+import { isSignedRequest, parseSlackEvent, postSlackReply, verifySlackBot } from "../dist/slack.js";
 import { processJob, startWorker } from "../dist/worker.js";
 
-const installation = { appId: "AEXAMPLE", teamId: "TEXAMPLE" };
+const installation = { appId: "AEXAMPLE", teamId: "TEXAMPLE", botUserId: "UBOT" };
 const secret = "exampleSignSecret";
 const time = 1_700_000_000_000;
 const body = Buffer.from('{"test":"é"}');
@@ -121,11 +121,101 @@ test("ignores other installations, Slack Connect, bots, edits, out-of-scope mess
     { ...envelope, is_ext_shared_channel: true },
     ...[
       { bot_id: "BBOT" }, { app_id: "AOTHER" }, { bot_profile: {} }, { display_as_bot: true },
+      { source_team: "TOTHER" }, { user_team: "TOTHER" },
       { subtype: "message_changed" }, { type: "message", channel_type: "channel" },
       { type: "message", channel_type: "mpim" }, { thread_ts: "1700000000.000005" },
       { text: "" }, { text: "\0" }, { text: "x".repeat(8001) },
     ].map((event) => ({ ...envelope, event: { ...envelope.event, ...event } })),
   ]) assert.equal(parseSlackEvent(payload, installation).kind, "ignore");
+});
+
+test("uses the verified bot user to reject explicit authorization mismatches and its own messages", () => {
+  const accepted = [
+    undefined, [{ is_bot: false, user_id: "UINSTALLER" }],
+    [{ is_bot: true, user_id: "UBOT", team_id: null }],
+    [{ is_bot: true, user_id: "UBOT", team_id: installation.teamId }],
+  ];
+  for (const authorizations of accepted) {
+    assert.equal(parseSlackEvent({ ...envelope, authorizations }, installation).kind, "input");
+  }
+  const authorizations = [{ is_bot: true, user_id: "UOTHERBOT", team_id: installation.teamId }];
+  assert.equal(parseSlackEvent({ ...envelope, authorizations }, installation).kind, "ignore");
+  assert.equal(parseSlackEvent({ ...envelope, event: { ...envelope.event, user: "UBOT" } }, installation).kind,
+    "ignore");
+  const enterpriseMember = { ...envelope, event: { ...envelope.event, user_team: "EEXAMPLE" } };
+  assert.equal(parseSlackEvent(enterpriseMember, installation).kind, "input");
+});
+
+const botAuth = { ok: true, user_id: installation.botUserId, bot_id: "BBOT", team_id: installation.teamId };
+const botInfo = { id: botAuth.bot_id, app_id: installation.appId, user_id: installation.botUserId };
+const authUrl = "https://slack.com/api/auth.test";
+const botInfoUrl = "https://slack.com/api/bots.info?bot=BBOT";
+
+test("uses the Slack token to confirm the configured workspace and exact app", async () => {
+  for (const bot of [botInfo, { ...botInfo, user_id: undefined }]) {
+    const calls = [];
+    const verified = await verifySlackBot(token, installation, async (url, options) => {
+      const address = String(url);
+      calls.push([address, options.method, options.signal]);
+      assert.equal(options.headers.authorization, `Bearer ${token}`);
+      assert.equal(options.redirect, "error");
+      assert.equal(options.signal.aborted, false);
+      if (address === authUrl) return Response.json(botAuth);
+      assert.equal(address, botInfoUrl);
+      return Response.json({ ok: true, bot });
+    });
+    assert.equal(verified, installation.botUserId);
+    assert.deepEqual(calls.map(([url, method]) => [url, method]), [[authUrl, "POST"], [botInfoUrl, "GET"]]);
+    assert.equal(calls[0][2], calls[1][2]);
+  }
+  for (const [change, message] of [
+    [{ team_id: "TOTHER" }, "slack_installation_mismatch"],
+    [{ is_enterprise_install: true }, "slack_installation_mismatch"],
+    [{ bot_id: undefined }, "slack_bot_token_invalid"],
+    [{ user_id: undefined }, "slack_bot_token_invalid"],
+    [{ ok: false, error: "invalid_auth" }, "slack_bot_token_invalid"],
+  ]) {
+    let calls = 0;
+    await assert.rejects(() => verifySlackBot(token, installation, async () => {
+      calls++;
+      return Response.json({ ...botAuth, ...change });
+    }), { message });
+    assert.equal(calls, 1);
+  }
+});
+
+test("rejects the wrong app ID even with a correct token in the same workspace", async () => {
+  for (const change of [
+    { app_id: "AOTHER" }, { app_id: undefined }, { id: "BOTHER" }, { user_id: "UOTHER" }, { deleted: true },
+  ]) {
+    await assert.rejects(() => verifySlackBot(token, installation, async (url) => String(url) === authUrl
+      ? Response.json(botAuth)
+      : Response.json({ ok: true, bot: { ...botInfo, ...change } })), { message: "slack_installation_mismatch" });
+  }
+  const wrongConfig = { ...installation, appId: "AWRONG" };
+  await assert.rejects(() => verifySlackBot(token, wrongConfig, async (url) => String(url) === authUrl
+    ? Response.json(botAuth)
+    : Response.json({ ok: true, bot: botInfo })), { message: "slack_installation_mismatch" });
+  await assert.rejects(() => verifySlackBot(token, installation, async (url) => String(url) === authUrl
+    ? Response.json(botAuth)
+    : Response.json({ ok: false, error: "missing_scope" })), { message: "slack_identity_scope_missing" });
+});
+
+test("keeps temporary Slack identity failures and rate limits retryable at either endpoint", async () => {
+  const failures = [
+    [() => new Response("private error", { status: 503 }), { message: "slack_auth_unavailable" }],
+    ...["fatal_error", "internal_error", "org_login_required", "service_unavailable", "team_added_to_org"]
+      .map((error) => [() => Response.json({ ok: false, error }), { message: "slack_auth_unavailable" }]),
+    [() => new Response(null, { status: 429, headers: { "retry-after": "4" } }),
+      { message: "slack_auth_unavailable", retryAfterSeconds: 4 }],
+    [() => Response.json({ ok: false, error: "ratelimited" }, { headers: { "retry-after": "4" } }),
+      { message: "slack_auth_unavailable", retryAfterSeconds: 4 }],
+  ];
+  for (const [response, error] of failures) {
+    await assert.rejects(() => verifySlackBot(token, installation, async () => response()), error);
+    await assert.rejects(() => verifySlackBot(token, installation, async (url) => String(url) === authUrl
+      ? Response.json(botAuth) : response()), error);
+  }
 });
 
 test("configuration rejects empty credentials, bad database URLs and excess concurrency", () => {
@@ -327,10 +417,14 @@ test("queued files respect the worker flag and incomplete downloads get a reply"
   await processJob(queue, withFiles, noAgent, deliver, async () => {
     throw new Error("slack_files_missing_scope");
   });
+  await processJob(queue, withFiles, noAgent, deliver, async () => {
+    throw new Error("slack_file_share_unconfirmed");
+  });
   assert.equal(replies[0], "text reply");
   assert.match(replies[1], /File support is turned off/);
   assert.match(replies[2], /couldn't read all the attached files/);
   assert.match(replies[3], /grant files:read and reinstall/);
+  assert.match(replies[4], /verify the file on this message/);
 });
 
 test("finishes an in-flight claim when shutdown starts", async () => {

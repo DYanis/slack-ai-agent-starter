@@ -13,12 +13,8 @@ oauth_config:
       - chat:write
       - files:read
       - im:history
+      - users:read
     bot_optional:
       - files:read
 settings:
-  event_subscriptions:
-    request_url: https://YOUR-SERVICE.up.railway.app/slack/events
-    bot_events:
-      - app_mention
-      - message.im
   socket_mode_enabled: false

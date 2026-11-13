@@ -119,7 +119,7 @@ for (const fixture of providerCases) {
 
 test("provider errors give safe replies and perform no immediate retries", async (t) => {
   const log = t.mock.method(console, "warn", () => {});
-  const statuses = [[401, /check the model and API key/], [429, /limiting requests/],
+  const statuses = [[401, /check the model and API key/], [402, /check billing/], [429, /quota and billing/],
     [500, /could not answer/], [307, /could not answer/]];
   for (const [status, message] of statuses) {
     let requests = 0;
@@ -144,9 +144,21 @@ test("provider errors give safe replies and perform no immediate retries", async
 });
 
 test("handles blocked or empty content, explicit refusal and an output limit", async () => {
-  const blocked = createAgent(configured("gemini", "test-model"),
-    async () => Response.json({ promptFeedback: { blockReason: "SAFETY" } }));
-  assert.match(await blocked(input, signal), /returned no text/);
+  const blocked = [
+    ["gemini", { promptFeedback: { blockReason: "SAFETY" } }],
+    ...["PROHIBITED_CONTENT", "ESCALATION", "PUP_LIMITED_DISABLED", "IMAGE_RECITATION"].map((finishReason) =>
+      ["gemini", { candidates: [{ content: { parts: [{ text: "Partial blocked text" }] }, finishReason }] }]),
+    ["claude", { content: [], stop_reason: "refusal", stop_details: { explanation: "Private reason" } }],
+    ["claude", { content: [{ type: "text", text: "Partial blocked text" }], stop_reason: "refusal" }],
+    ["openai", { ...openaiReply("Partial blocked text"), status: "incomplete",
+      incomplete_details: { reason: "content_filter" } }],
+  ];
+  for (const [provider, reply] of blocked) {
+    const agent = createAgent(configured(provider, "test-model"), async () => Response.json(reply));
+    assert.equal(await agent(input, signal), "The AI provider declined this request. Try a different question.");
+  }
+  const empty = createAgent(configured("gemini", "test-model"), async () => Response.json({ candidates: [] }));
+  assert.match(await empty(input, signal), /returned no text/);
   const refusal = openaiReply("");
   refusal.output[0].content = [{ type: "refusal", refusal: "I cannot help with that." }];
   assert.equal(await createAgent(configured("openai", "test-model"),
@@ -156,6 +168,7 @@ test("handles blocked or empty content, explicit refusal and an output limit", a
       incomplete_details: { reason: "max_output_tokens" } }],
     ["claude", { content: [{ type: "text", text: "Partial response" }], stop_reason: "max_tokens" }],
     ["gemini", { candidates: [{ content: { parts: [{ text: "Partial response" }] }, finishReason: "MAX_TOKENS" }] }],
+    ["gemini", { candidates: [{ content: { parts: [{ text: "Partial response" }] }, finishReason: "CONTINUATION" }] }],
   ];
   for (const [provider, reply] of limitedReplies) {
     assert.equal(await createAgent(configured(provider, "test-model"),

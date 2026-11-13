@@ -169,8 +169,10 @@ test("Slack 429 holds new sends and retries the saved reply without regenerating
   let generations = 0;
   let downloads = 0;
   const agent = async () => { generations++; return "generated"; };
-  const loadFiles = async (_channelId, ids) => {
+  const loadFiles = async (message, ids) => {
     downloads++;
+    assert.equal(message.channelId, limited.channelId);
+    assert.equal(message.messageTs, limited.messageTs);
     assert.deepEqual(ids, ["FLIMITED"]);
     return [{ name: "sample.txt", mimeType: "text/plain", bytes: Buffer.from("sample") }];
   };
@@ -180,11 +182,15 @@ test("Slack 429 holds new sends and retries the saved reply without regenerating
   const row = await state(database, "EvLimited");
   assert.equal(row.status, "pending");
   assert.equal(row.reply_text, "generated");
+  assert.equal(row.input_text, null);
+  assert.equal(row.user_id, null);
   assert.equal(row.file_ids, null);
   assert(row.run_after.getTime() > before + 55_000);
   assert.equal(await other.reserveSend(parallel, "parallel reply"), false);
   const deferred = await state(database, "EvParallel");
   assert.equal(deferred.send_attempts, 0);
+  assert.equal(deferred.input_text, null);
+  assert.equal(deferred.user_id, null);
   assert.equal(deferred.file_ids, null);
   assert.equal(await other.claim(), undefined);
   await database.query("UPDATE agent_runtime SET slack_blocked_until = '-infinity'");
