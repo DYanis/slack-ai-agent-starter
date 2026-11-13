@@ -1,17 +1,18 @@
 # Slack AI Agents Starter
 
-A TypeScript starter for building Slack AI agents on Railway. Each deployment runs one Slack app with a private PostgreSQL database. You can use a demo reply to check Slack delivery, then connect OpenAI, Claude, or Gemini using service variables. With a model connected, the app sends supported files attached to direct messages and channel mentions to that provider by default.
+Run your own Slack AI agent on Railway with OpenAI, Claude, or Gemini. Set the model, instructions, and API key in Railway. Each deployment serves one Slack app in one workspace and includes a private PostgreSQL database to queue replies.
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/slack-ai-agent-starter)
 
 ## Set up an agent
 
-1. Create and install a Slack app for one workspace. Use [slack-manifest.yaml](slack-manifest.yaml) as a starting point. Remove the `event_subscriptions` block before importing it so Slack does not need a Request URL yet. Grant the optional `files:read` permission to handle attachments.
-2. Copy the signing secret from **Basic Information** and the bot token from **OAuth & Permissions**. Use the IDs of that same Slack app and workspace.
-3. Open the Railway template, fill in the required Slack variables, and deploy. It creates the app service and a private PostgreSQL service with a persistent volume. Use a separate deployment and database for each Slack app. Set `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` to `55` on the app service before using it, then wait for `/health/ready` to return HTTP 200.
-4. In Slack, turn on **Event Subscriptions** for `app_mention` and `message.im`. Use your Railway public HTTPS URL followed by `/slack/events` as the Request URL and confirm Slack verifies it. Reinstall if Slack requests it. Make sure the App Home **Messages** tab lets users send messages.
-5. Invite the bot to a test channel and mention it. Also send it a direct message. It should reply in each thread. If it does not, check that the token is from the same Slack app and workspace, that the app has `chat:write`, and that it joined the test channel. `/health/ready` checks database access.
-6. To enable AI replies, configure a provider in the app service. You can do this after the Slack delivery check.
+You need a Railway account and permission to install an app in your Slack workspace. You can check Slack delivery in demo mode before adding an AI key.
+
+1. Open [Your Apps](https://api.slack.com/apps) and choose **Create New App → From an app manifest**. Select your workspace, paste [slack-manifest.yaml](slack-manifest.yaml), and install the app. Grant the optional `files:read` permission if you want the bot to read attachments.
+2. In the Slack app's **Basic Information**, copy the **App ID** and **Signing Secret**. In **OAuth & Permissions**, copy the **Bot User OAuth Token**, which begins with `xoxb-`. Find the [workspace ID](https://slack.com/help/articles/221769328-Locate-your-Slack-URL-or-ID) starting with `T` in the address of a channel you open in Slack in your browser. Use the IDs and token from the same installation.
+3. Open the Railway template, enter the four Slack values below, and deploy. Leave `AI_PROVIDER` blank for a demo reply. On the app service, copy the HTTPS domain under **Settings → Public Networking**. If you do not see one, choose **Generate Domain** on port `3000`. Wait for `/health/ready` at that domain to return HTTP 200.
+4. In the Slack app settings, open **Event Subscriptions** and turn on **Enable Events**. Enter the Railway HTTPS domain followed by `/slack/events` as the **Request URL**. Wait for Slack to verify it. Under **Subscribe to bot events**, add `app_mention` and `message.im`, then save. Reinstall if Slack asks and update the Railway token if it changed.
+5. Invite the bot to an ordinary test channel and mention it. Also send the bot a direct message from its **Messages** tab. A demo reply in both threads confirms that Slack can deliver events and the bot can reply. Continue with [Connect an AI model](#connect-an-ai-model).
 
 | Variable | Meaning |
 | --- | --- |
@@ -24,19 +25,23 @@ A TypeScript starter for building Slack AI agents on Railway. Each deployment ru
 | `WORKER_CONCURRENCY` | Concurrent work across separate threads. Default 4, range 1 to 8. |
 | `PORT` | Defaults to 3000 and matches the template's public HTTP port. |
 
+Use a separate app service and database for each Slack installation. The template sets up the private database connection and the shutdown grace period.
+
 ## Connect an AI model
 
 1. In the Railway project, open the app service and select **Variables**. Set `AI_PROVIDER` and `AI_MODEL`. Use a text model ID available to your account.
-2. Add the API key for the selected provider and seal the variable in Railway. Set `AI_INSTRUCTIONS` to tell the bot how to reply, such as `Answer in Bulgarian and use short paragraphs`. The default asks for a brief plain text reply. The service Variables editor supports multiple lines.
+2. Add an API key from your own provider account and [seal the variable](https://docs.railway.com/variables#sealed-variables) in Railway. Set `AI_INSTRUCTIONS` to tell the bot how to reply, such as `Answer in Bulgarian and use short paragraphs`. To use a Markdown instruction file, paste its contents into `AI_INSTRUCTIONS` in the service Variables editor. The editor supports multiple lines.
 3. Click **Deploy** to apply the variables and send a new Slack message. Leave `AI_PROVIDER` empty or set it to `demo` to use the built-in setup reply. A selected provider requires both its model and its key.
 
 | `AI_PROVIDER` | `AI_MODEL` example | API key variable |
 | --- | --- | --- |
 | `openai` | `gpt-6-luna` | `OPENAI_API_KEY` |
 | `claude` | `claude-haiku-4-5` | `ANTHROPIC_API_KEY` (key scoped to one Claude workspace) |
-| `gemini` | `gemini-3.5-flash-lite` | `GEMINI_API_KEY` |
+| `gemini` | `gemini-3.5-flash-lite` | `GEMINI_API_KEY` (use a billing-enabled project for workplace use) |
 
 The selected provider receives the current Slack message text, configured instructions, and supported attachments when file processing is enabled. Add your own conversation history if your agent needs context across replies. The included providers generate plain text without tools. The app gives a model up to 22 seconds to reply, or 14 seconds after downloading an attachment, within the worker's 25-second deadline.
+
+Use a provider account approved for the data people will send. Provider data use and retention follow your account terms. Google requires paid Gemini API service for apps made available to users in the EEA, Switzerland, or the UK. Its unpaid terms restrict sending sensitive, confidential, or personal information. Review the [Gemini API terms](https://aistudio.google.com/docs/terms) before connecting a workspace.
 
 For custom integrations, make your own copy of the repository and use the `Agent` contract in [src/agent.ts](src/agent.ts). Return a plain text reply and pass the provided abort signal to provider calls. The worker may retry generation after a restart. Protect external writes with their own approval and duplicate prevention.
 
@@ -46,11 +51,23 @@ For custom integrations, make your own copy of the repository and use the `Agent
 2. Keep `SLACK_FILES_ENABLED=true` to send supported attachments to the selected provider. Set it to `false` in the Railway service or local `.env` to turn file processing off. If you are updating an older installation with `false` saved in Railway, set it to `true` to enable files.
 3. Attach a file to a message that mentions the bot, or send it in a direct message to the bot. Include a question to guide the reply. If you send only a file, the bot asks the model to summarize it. Demo mode reports the number of files it received.
 
-The worker accepts up to three Slack-hosted uploads or text snippets with a combined size of 8 MiB per message. It checks that each file is still shared in that conversation before downloading it. The queue holds file IDs until the reply is saved or the job ends. Downloaded bytes stay in memory during processing.
+The worker accepts up to three Slack-hosted uploads or text snippets with a combined size of 8 MiB per message. It checks that Slack still lists each file as shared on that message before downloading it. If Slack cannot confirm the share, upload the file again directly in that thread. The queue holds file IDs until the reply is saved or the job ends. Downloaded bytes stay in memory during processing.
 
-The built-in integrations accept PDF, JPEG, PNG, WebP, and UTF-8 plain text, Markdown, CSV, TSV, and JSON. Text attachments have a combined limit of 64 KiB. Claude images have a 7.5 MB limit per image before encoding. Choose a model that supports images and PDFs if you need those formats. The bot asks for a supported set if any attachment is unavailable, too large, or in an unsupported format. Files are included directly in the model request.
+The built-in integrations accept PDF, JPEG, PNG, WebP, and UTF-8 plain text, Markdown, CSV, TSV, and JSON. Text attachments have a combined limit of 64 KiB. Claude images have a 7.5 MB limit per image before encoding. Choose a model that supports images and PDFs if you need those formats. Model limits also apply. For example, Claude Haiku 4.5 accepts up to 100 PDF pages per request. Split larger PDFs and use unencrypted files. The bot asks for a supported set if any attachment is unavailable, too large, or in an unsupported format. Files are included directly in the model request.
 
 A custom agent receives optional `input.files`, each with a name, MIME type, and raw bytes. Treat the file and its metadata as untrusted. An agent that opens archives or sends files to a model needs its own content, extraction, and data handling limits.
+
+## Troubleshoot setup
+
+| Symptom | What to check |
+| --- | --- |
+| Slack cannot verify the Request URL | Confirm that Railway reports the service ready. Check the public HTTPS domain, the `/slack/events` path, and the signing secret. |
+| Slack verifies the URL but the bot is silent | Check the app and workspace IDs and use the bot token from that app's installation. Confirm both bot events are saved and the bot is invited to the channel. Use a local workspace channel or a direct message. |
+| The service reports `slack_installation_mismatch` or `slack_bot_token_invalid` | Copy the app, workspace, and bot token values from the same installation. For this template, install the app to the workspace. |
+| The service reports `slack_auth_unavailable` | Check that the Railway service can reach `slack.com` and retry the deployment when Slack is available. |
+| The service reports `database_installation_mismatch` | Use the original Slack app and workspace IDs with this database. Use a separate database when setting up a different installation. |
+| Text works but files do not | Grant `files:read`, reinstall if needed, and check that `SLACK_FILES_ENABLED=true`. Send a fresh supported file with `@bot` or in a direct message. |
+| Demo works but the model fails | Check the provider, model access, API key, billing, and outbound network access. Use a model that accepts the input format. |
 
 ## Run locally
 
@@ -74,7 +91,7 @@ Set `TEST_DATABASE_URL` to a disposable PostgreSQL database before running integ
 - Recovers interrupted generation within a bounded retry budget. Each generation attempt has a 25-second deadline. On a Slack rate limit, it respects `Retry-After`, pauses further send reservations for the workspace and keeps the generated reply for the next attempt. A confirmed rate limit that arrives after recovery released the thread can requeue the older reply after newer work has started.
 - Records the send attempt before calling Slack. If it cannot confirm the outcome, it marks the job `uncertain` for investigation. Check the actual thread before asking anyone to resend. A crash between the checkpoint and the HTTP request can leave an unsent reply in this state.
 - Local Compose allows up to 55 seconds for in-progress work to finish. On Railway, set the app's [draining time](https://docs.railway.com/deployments/deployment-teardown#draining-time) to 55 seconds to give it the same window. After a hard stop, the next worker recovers expired claims and does not automatically repeat a send whose outcome is unknown.
-- Removes message and reply text when a job reaches a final state. The worker retains delivery metadata for seven days for deduplication and troubleshooting. It expires queued work after 24 hours. Database backups have their own retention.
+- Drops the original message text, sender ID, and file IDs once the reply is saved. It keeps the reply until delivery finishes and retains delivery metadata for seven days. It expires queued work after 24 hours. Database backups have their own retention.
 
 This starter uses the Slack Events API for ordinary Slack apps. Existing Slack-hosted Deno workflows need their own adapter. It handles Slack transport and queued replies so you can implement agent behavior in one place. Bring your own model credentials and integrations.
 

@@ -16,7 +16,7 @@ async function generateReply(
   const input: AgentInput = { eventId, channelId, threadTs, messageTs, userId, text };
   if (loadFiles && fileIds.length) {
     try {
-      input.files = await loadFiles(channelId, fileIds, signal);
+      input.files = await loadFiles(input, fileIds, signal);
     } catch (error) {
       signal.throwIfAborted();
       if (error instanceof Error && error.message === "slack_files_rate_limited") {
@@ -24,6 +24,9 @@ async function generateReply(
       }
       if (error instanceof Error && error.message === "slack_files_missing_scope") {
         return "I need permission to read Slack files. Ask the app owner to grant files:read and reinstall the app.";
+      }
+      if (error instanceof Error && error.message === "slack_file_share_unconfirmed") {
+        return "I couldn't verify the file on this message. Upload it again directly in this conversation.";
       }
       return "I couldn't read all the attached files. Upload up to three files directly to this Slack conversation, with a total size of 8 MiB or less. If that still fails, ask the app owner to check file access.";
     }

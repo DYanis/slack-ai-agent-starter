@@ -1,4 +1,5 @@
 import { asRecord, maxSlackFiles, retryAfter, slackFileId } from "./slack.js";
+import type { SlackInput } from "./slack.js";
 
 export type SlackFile = Readonly<{
   name: string;
@@ -6,8 +7,10 @@ export type SlackFile = Readonly<{
   bytes: Uint8Array;
 }>;
 
+type SlackFileMessage = Pick<SlackInput, "channelId" | "messageTs" | "threadTs">;
+
 export type LoadSlackFiles = (
-  channelId: string, fileIds: readonly string[], signal: AbortSignal,
+  message: SlackFileMessage, fileIds: readonly string[], signal: AbortSignal,
 ) => Promise<readonly SlackFile[]>;
 
 const maxFileBytes = 8 * 1024 * 1024;
@@ -18,20 +21,21 @@ const slackDownloadOrigin = "https://downloads.slack-edge.com";
 const downloadRedirects = new Set([301, 302, 303, 307, 308]);
 const maxDownloadRedirects = 3;
 
-function isSharedInConversation(file: Record<string, unknown>, channelId: string): boolean {
+function isAttachedToMessage(file: Record<string, unknown>, message: SlackFileMessage): boolean {
   const shares = asRecord(file.shares);
-  const hasShare = [shares?.public, shares?.private].some((visibility) => {
-    const entries = asRecord(visibility)?.[channelId];
-    return Array.isArray(entries) && entries.some((entry) => typeof asRecord(entry)?.ts === "string");
+  return [shares?.public, shares?.private].some((visibility) => {
+    const entries = asRecord(visibility)?.[message.channelId];
+    return Array.isArray(entries) && entries.some((entry) => {
+      const share = asRecord(entry);
+      return share?.ts === message.messageTs &&
+        (share.thread_ts === undefined || share.thread_ts === message.threadTs);
+    });
   });
-  return hasShare || [file.channels, file.groups, file.ims].some(
-    (ids) => Array.isArray(ids) && ids.includes(channelId),
-  );
 }
 
 function isSlackFileUrl(url: URL, id: string): boolean {
   const filePath = /^\/files-pri\/[A-Z0-9]+-(F[A-Z0-9]+)\//.exec(url.pathname);
-  return url.origin === slackFileOrigin && filePath?.[1] === id;
+  return url.protocol === "https:" && url.origin === slackFileOrigin && filePath?.[1] === id;
 }
 
 async function readBytes(response: Response, limit: number): Promise<Buffer> {
@@ -91,14 +95,15 @@ export function createSlackFileLoader(token: string, request: typeof fetch = fet
       const next = new URL(location, url);
       // A redirect to Slack's download CDN drops credentials for the rest of the chain.
       const sameFile = url.origin === slackFileOrigin && isSlackFileUrl(next, id);
-      if (next.username || next.password || next.hash || (!sameFile && next.origin !== slackDownloadOrigin)) {
+      if (next.protocol !== "https:" || next.username || next.password || next.hash ||
+          (!sameFile && next.origin !== slackDownloadOrigin)) {
         throw new Error("slack_file_url_untrusted");
       }
       url = next;
     }
   }
 
-  return async (channelId, fileIds, signal) => {
+  return async (message, fileIds, signal) => {
     if (fileIds.length > maxSlackFiles) throw new Error("slack_file_count_limit");
     const fileSignal = AbortSignal.any([signal, AbortSignal.timeout(fileBudgetMs)]);
     const files: SlackFile[] = [];
@@ -120,8 +125,8 @@ export function createSlackFileLoader(token: string, request: typeof fetch = fet
           (file.mode !== "hosted" && file.mode !== "snippet") ||
           file.is_external === true || file.filetype === "remote" ||
           typeof file.size !== "number" || !Number.isSafeInteger(file.size) ||
-          file.size < 0 || file.size > remaining ||
-          !isSharedInConversation(file, channelId)) throw new Error("slack_file_unavailable");
+          file.size < 0 || file.size > remaining) throw new Error("slack_file_unavailable");
+      if (!isAttachedToMessage(file, message)) throw new Error("slack_file_share_unconfirmed");
 
       const download = file.url_private_download ?? file.url_private;
       if (typeof download !== "string") throw new Error("slack_file_url_missing");

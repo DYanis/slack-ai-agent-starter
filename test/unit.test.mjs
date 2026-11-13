@@ -5,7 +5,7 @@ import { request } from "node:http";
 import { test } from "node:test";
 import { readConfig } from "../dist/config.js";
 import { createHttpServer } from "../dist/http.js";
-import { isSignedRequest, parseSlackEvent, postSlackReply } from "../dist/slack.js";
+import { isSignedRequest, parseSlackEvent, postSlackReply, verifySlackBot } from "../dist/slack.js";
 import { processJob, startWorker } from "../dist/worker.js";
 
 const installation = { appId: "AEXAMPLE", teamId: "TEXAMPLE" };
@@ -121,11 +121,63 @@ test("ignores other installations, Slack Connect, bots, edits, out-of-scope mess
     { ...envelope, is_ext_shared_channel: true },
     ...[
       { bot_id: "BBOT" }, { app_id: "AOTHER" }, { bot_profile: {} }, { display_as_bot: true },
+      { source_team: "TOTHER" }, { user_team: "TOTHER" },
       { subtype: "message_changed" }, { type: "message", channel_type: "channel" },
       { type: "message", channel_type: "mpim" }, { thread_ts: "1700000000.000005" },
       { text: "" }, { text: "\0" }, { text: "x".repeat(8001) },
     ].map((event) => ({ ...envelope, event: { ...envelope.event, ...event } })),
   ]) assert.equal(parseSlackEvent(payload, installation).kind, "ignore");
+});
+
+test("uses the verified bot user to reject explicit authorization mismatches and its own messages", () => {
+  const verified = { ...installation, botUserId: "UBOT" };
+  const accepted = [
+    undefined, [{ is_bot: false, user_id: "UINSTALLER" }],
+    [{ is_bot: true, user_id: "UBOT", team_id: null }],
+    [{ is_bot: true, user_id: "UBOT", team_id: installation.teamId }],
+  ];
+  for (const authorizations of accepted) {
+    assert.equal(parseSlackEvent({ ...envelope, authorizations }, verified).kind, "input");
+  }
+  const authorizations = [{ is_bot: true, user_id: "UOTHERBOT", team_id: installation.teamId }];
+  assert.equal(parseSlackEvent({ ...envelope, authorizations }, verified).kind, "ignore");
+  assert.equal(parseSlackEvent({ ...envelope, event: { ...envelope.event, user: "UBOT" } }, verified).kind,
+    "ignore");
+  const enterpriseMember = { ...envelope, event: { ...envelope.event, user_team: "EEXAMPLE" } };
+  assert.equal(parseSlackEvent(enterpriseMember, verified).kind, "input");
+});
+
+test("verifies the Slack bot token before binding the installation", async () => {
+  const identity = { ok: true, user_id: "UBOT", bot_id: "BBOT", team_id: installation.teamId };
+  const request = async (url, options) => {
+    assert.equal(url, "https://slack.com/api/auth.test");
+    assert.equal(options.method, "POST");
+    assert.equal(options.headers.authorization, `Bearer ${token}`);
+    assert.equal(options.redirect, "error");
+    assert.equal(options.signal.aborted, false);
+    return Response.json(identity);
+  };
+  assert.equal(await verifySlackBot(token, installation, request), "UBOT");
+  for (const [result, code] of [
+    [{ team_id: "TOTHER" }, "slack_installation_mismatch"],
+    [{ app_id: "AOTHER" }, "slack_installation_mismatch"],
+    [{ is_enterprise_install: true }, "slack_installation_mismatch"],
+    [{ bot_id: undefined }, "slack_bot_token_invalid"],
+    [{ ok: false, error: "invalid_auth" }, "slack_bot_token_invalid"],
+  ]) {
+    await assert.rejects(() => verifySlackBot(token, installation,
+      async () => Response.json({ ...identity, ...result })), { message: code });
+  }
+  await assert.rejects(() => verifySlackBot(token, installation,
+    async () => new Response("private error", { status: 503 })), { message: "slack_auth_unavailable" });
+  for (const response of [
+    new Response(null, { status: 429, headers: { "retry-after": "4" } }),
+    Response.json({ ok: false, error: "ratelimited" }, { headers: { "retry-after": "4" } }),
+  ]) {
+    await assert.rejects(() => verifySlackBot(token, installation, async () => response), {
+      message: "slack_auth_unavailable", retryAfterSeconds: 4,
+    });
+  }
 });
 
 test("configuration rejects empty credentials, bad database URLs and excess concurrency", () => {
@@ -327,10 +379,14 @@ test("queued files respect the worker flag and incomplete downloads get a reply"
   await processJob(queue, withFiles, noAgent, deliver, async () => {
     throw new Error("slack_files_missing_scope");
   });
+  await processJob(queue, withFiles, noAgent, deliver, async () => {
+    throw new Error("slack_file_share_unconfirmed");
+  });
   assert.equal(replies[0], "text reply");
   assert.match(replies[1], /File support is turned off/);
   assert.match(replies[2], /couldn't read all the attached files/);
   assert.match(replies[3], /grant files:read and reinstall/);
+  assert.match(replies[4], /verify the file on this message/);
 });
 
 test("finishes an in-flight claim when shutdown starts", async () => {

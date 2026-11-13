@@ -10,7 +10,7 @@ export type SlackInput = {
   fileIds?: readonly string[];
 };
 
-export type Installation = { appId: string; teamId: string };
+export type Installation = { appId: string; teamId: string; botUserId?: string };
 
 const slackTimestamp = /^\d{10,12}\.\d{6}$/;
 const textLimit = 8000;
@@ -23,6 +23,52 @@ export function asRecord(value: unknown): Record<string, unknown> | undefined {
     return undefined;
   }
   return value as Record<string, unknown>;
+}
+
+export class SlackAuthUnavailable extends Error {
+  constructor(readonly retryAfterSeconds?: number) {
+    super("slack_auth_unavailable");
+  }
+}
+
+export async function verifySlackBot(
+  token: string, installation: Installation, request: typeof fetch = fetch,
+): Promise<string> {
+  let response: Response;
+  let data: Record<string, unknown> | undefined;
+  try {
+    response = await request("https://slack.com/api/auth.test", {
+      method: "POST",
+      redirect: "error",
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (response.ok) {
+      data = asRecord(await response.json());
+    } else {
+      void response.body?.cancel().catch(() => {});
+    }
+  } catch {
+    throw new SlackAuthUnavailable();
+  }
+  if (response.status === 401 || response.status === 403) throw new Error("slack_bot_token_invalid");
+  if (response.status === 429 || data?.error === "ratelimited" || data?.error === "rate_limited") {
+    throw new SlackAuthUnavailable(retryAfter(response.headers));
+  }
+  if (!response.ok || typeof data?.ok !== "boolean" ||
+      data.error === "internal_error" || data.error === "service_unavailable") {
+    throw new SlackAuthUnavailable();
+  }
+  if (!data.ok) throw new Error("slack_bot_token_invalid");
+  if (data.team_id !== installation.teamId || data.is_enterprise_install === true ||
+      (data.app_id !== undefined && data.app_id !== installation.appId)) {
+    throw new Error("slack_installation_mismatch");
+  }
+  if (typeof data.user_id !== "string" || !/^[UW][A-Z0-9]+$/.test(data.user_id) ||
+      typeof data.bot_id !== "string" || !/^B[A-Z0-9]+$/.test(data.bot_id)) {
+    throw new Error("slack_bot_token_invalid");
+  }
+  return data.user_id;
 }
 
 export function hasFreshSignatureHeaders(timestamp: string, signature: string, now = Date.now()): boolean {
@@ -66,15 +112,32 @@ export function parseSlackEvent(value: unknown, installation: Installation, file
       !event || event.bot_id || event.app_id || event.bot_profile ||
       event.display_as_bot === true) return { kind: "ignore" };
 
+  for (const team of [event.source_team, event.user_team]) {
+    if (typeof team === "string" && /^T[A-Z0-9]+$/.test(team) && team !== installation.teamId) {
+      return { kind: "ignore" };
+    }
+  }
+
   const channelId = event.channel;
   const userId = event.user;
   const messageTs = event.ts;
   const threadTs = event.thread_ts ?? messageTs;
   if (typeof channelId !== "string" || !/^[CDG][A-Z0-9]+$/.test(channelId) ||
-      typeof userId !== "string" || !/^[UW][A-Z0-9]+$/.test(userId) ||
+      typeof userId !== "string" || !/^[UW][A-Z0-9]+$/.test(userId) || userId === installation.botUserId ||
       typeof messageTs !== "string" || !slackTimestamp.test(messageTs) ||
       typeof threadTs !== "string" || !slackTimestamp.test(threadTs) ||
       BigInt(threadTs.replace(".", "")) > BigInt(messageTs.replace(".", ""))) return { kind: "ignore" };
+
+  if (installation.botUserId && Array.isArray(payload.authorizations)) {
+    const bots = payload.authorizations.map(asRecord).filter((authorization) =>
+      authorization?.is_bot === true && typeof authorization.user_id === "string" &&
+      (authorization.team_id == null || authorization.team_id === installation.teamId),
+    );
+    // Some valid events show a user authorization or omit the bot identity.
+    if (bots.length && !bots.some((bot) => bot?.user_id === installation.botUserId)) {
+      return { kind: "ignore" };
+    }
+  }
 
   const mention = event.type === "app_mention" && /^[CG]/.test(channelId);
   const dm = event.type === "message" && event.channel_type === "im" &&

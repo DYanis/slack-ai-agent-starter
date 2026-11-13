@@ -1,15 +1,28 @@
 import { readFile } from "node:fs/promises";
+import { setTimeout as sleep } from "node:timers/promises";
 import { Pool } from "pg";
 import { createAgent } from "./agent.js";
 import { readConfig } from "./config.js";
 import { createHttpServer } from "./http.js";
 import { Queue } from "./queue.js";
-import { postSlackReply } from "./slack.js";
+import { postSlackReply, SlackAuthUnavailable, verifySlackBot } from "./slack.js";
 import { createSlackFileLoader } from "./slack-files.js";
 import { startWorker } from "./worker.js";
 
 async function start() {
   const config = readConfig(process.env);
+  let botUserId: string;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      botUserId = await verifySlackBot(config.botToken, config);
+      break;
+    } catch (error) {
+      if (attempt >= 3 || !(error instanceof SlackAuthUnavailable)) throw error;
+      const delay = error.retryAfterSeconds === undefined ? 1500 : error.retryAfterSeconds * 1000;
+      if (delay > 60_000) throw error;
+      await sleep(delay);
+    }
+  }
   const connection = {
     connectionString: config.databaseUrl,
     connectionTimeoutMillis: 1000,
@@ -38,7 +51,7 @@ async function start() {
             (error instanceof Error && error.message === "database_installation_mismatch")) {
           throw error;
         }
-        await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+        await sleep(2000);
       }
     }
   } catch (error) {
@@ -50,7 +63,7 @@ async function start() {
     (job, reply) => postSlackReply(config.botToken, job, reply),
     config.filesEnabled ? createSlackFileLoader(config.botToken) : undefined);
   const server = createHttpServer({
-    installation: config,
+    installation: { appId: config.appId, teamId: config.teamId, botUserId },
     signingSecret: config.signingSecret,
     filesEnabled: config.filesEnabled,
     enqueue: (input) => ingress.enqueue(input),

@@ -13,6 +13,7 @@ const token = "xoxb-local-fixture";
 const secret = "localFixtureSecret";
 const installation = { appId: "AEXAMPLE", teamId: "TEXAMPLE" };
 const channelId = "DEXAMPLE";
+const fileMessage = { channelId, messageTs: "1700000000.000002", threadTs: "1700000000.000001" };
 const fileId = "FEXAMPLE";
 const fileUrl = "https://files.slack.com/files-pri/TEXAMPLE-FEXAMPLE/download/example.txt";
 const metadataUrl = "https://slack.com/api/files.info?file=FEXAMPLE";
@@ -20,7 +21,8 @@ const metadataUrl = "https://slack.com/api/files.info?file=FEXAMPLE";
 function fileResponse(file = {}) {
   return Response.json({
     ok: true, file: {
-      id: fileId, mode: "hosted", is_external: false, ims: [channelId],
+      id: fileId, mode: "hosted", is_external: false,
+      shares: { private: { [channelId]: [{ ts: fileMessage.messageTs, thread_ts: fileMessage.threadTs }] } },
       name: "example.txt", size: 5, mimetype: "text/plain", url_private_download: fileUrl,
       ...file,
     },
@@ -36,7 +38,7 @@ test("uses the signed message file ID and downloads from the matching Slack host
     assert.equal(options.signal.aborted, false);
     return String(url) === metadataUrl ? fileResponse() : new Response("hello");
   });
-  const files = await load(channelId, [fileId], new AbortController().signal);
+  const files = await load(fileMessage, [fileId], new AbortController().signal);
   assert.deepEqual(urls, [metadataUrl, fileUrl]);
   assert.deepEqual(files, [{ name: "example.txt", mimeType: "text/plain", bytes: Buffer.from("hello") }]);
 });
@@ -52,18 +54,21 @@ test("accepts an unnamed Slack snippet and uses a safe fallback for file names",
       assert.equal(String(url), snippetUrl);
       return new Response("hello");
     });
-    const [file] = await load(channelId, [fileId], new AbortController().signal);
+    const [file] = await load(fileMessage, [fileId], new AbortController().signal);
     assert.equal(file.name, fileId);
     assert.equal(file.bytes.toString(), "hello");
   }
 });
 
-test("rejects files outside the conversation and download addresses that could misuse the token", async () => {
+test("rejects files not attached to this message and download addresses that could misuse the token", async () => {
   for (const change of [
-    { ims: ["DOTHER"] }, { id: "FOTHER" }, { mode: "external" }, { is_external: true },
-    { ims: undefined, shares: { private: { DOTHER: [{ ts: "1700000000.000001" }] } } },
-    { ims: undefined, shares: { private: { [channelId]: [] } } },
-    { ims: undefined, shares: { private: { [channelId]: [null, {}] } } },
+    { shares: undefined, ims: [channelId] },
+    { shares: { private: { DOTHER: [{ ts: fileMessage.messageTs }] } }, ims: [channelId] },
+    { shares: { private: { [channelId]: [{ ts: "1700000000.000003" }] } }, ims: [channelId] },
+    { shares: { private: { [channelId]: [{ ts: fileMessage.messageTs, thread_ts: fileMessage.messageTs }] } } },
+    { shares: { private: { [channelId]: [] } } },
+    { shares: { private: { [channelId]: [null, {}] } } },
+    { id: "FOTHER" }, { mode: "external" }, { is_external: true },
     { filetype: "remote" },
     { url_private_download: "https://files.slack.com.example.invalid/files-pri/TEXAMPLE-FEXAMPLE/x" },
     { url_private_download: "https://files.slack.com@other.invalid/files-pri/TEXAMPLE-FEXAMPLE/x" },
@@ -79,8 +84,8 @@ test("rejects files outside the conversation and download addresses that could m
       requests++;
       return fileResponse(change);
     });
-    await assert.rejects(() => load(channelId, [fileId], new AbortController().signal),
-      /slack_file_unavailable|slack_file_url_untrusted/);
+    await assert.rejects(() => load(fileMessage, [fileId], new AbortController().signal),
+      /slack_file_unavailable|slack_file_share_unconfirmed|slack_file_url_untrusted/);
     assert.equal(requests, 1);
   }
 });
@@ -105,7 +110,7 @@ test("only bounded Slack download redirects are followed", async () => {
     return new Response("hello");
   });
   const signal = new AbortController().signal;
-  const [file] = await load(channelId, [fileId], signal);
+  const [file] = await load(fileMessage, [fileId], signal);
   assert.equal(file.bytes.toString(), "hello");
   assert.deepEqual(urls, [metadataUrl, fileUrl, sameFileUrl, cdnUrl]);
 
@@ -113,13 +118,14 @@ test("only bounded Slack download redirects are followed", async () => {
     "https://example.invalid", "https://downloads.slack-edge.com.example.invalid/file",
     "https://files.slack.com/files-pri/TEXAMPLE-FOTHER/download/example.txt",
     "http://downloads.slack-edge.com/file", "https://user@downloads.slack-edge.com/file",
+    "blob:https://downloads.slack-edge.com/example",
   ]) {
     const blocked = createSlackFileLoader(token, async (url) => {
       if (String(url) === metadataUrl) return fileResponse();
       assert.equal(String(url), fileUrl);
       return Response.redirect(target);
     });
-    await assert.rejects(() => blocked(channelId, [fileId], signal), /slack_file_url_untrusted/);
+    await assert.rejects(() => blocked(fileMessage, [fileId], signal), /slack_file_url_untrusted/);
   }
 
   let hops = 0;
@@ -128,7 +134,7 @@ test("only bounded Slack download redirects are followed", async () => {
     hops++;
     return Response.redirect(fileUrl);
   });
-  await assert.rejects(() => loop(channelId, [fileId], signal), /slack_file_redirect_unavailable/);
+  await assert.rejects(() => loop(fileMessage, [fileId], signal), /slack_file_redirect_unavailable/);
   assert.equal(hops, 4);
   const cdnLoop = createSlackFileLoader(token, async (url, options) => {
     if (String(url) === metadataUrl) return fileResponse();
@@ -137,7 +143,7 @@ test("only bounded Slack download redirects are followed", async () => {
     assert.equal(new Headers(options.headers).has("authorization"), false);
     return Response.redirect(fileUrl);
   });
-  await assert.rejects(() => cdnLoop(channelId, [fileId], signal), /slack_file_url_untrusted/);
+  await assert.rejects(() => cdnLoop(fileMessage, [fileId], signal), /slack_file_url_untrusted/);
 });
 
 test("metadata redirects and missing scope cannot deliver file content", async () => {
@@ -146,19 +152,19 @@ test("metadata redirects and missing scope cannot deliver file content", async (
     assert.equal(options.redirect, "error");
     return Response.redirect("https://example.invalid");
   });
-  await assert.rejects(() => redirected(channelId, [fileId], new AbortController().signal),
+  await assert.rejects(() => redirected(fileMessage, [fileId], new AbortController().signal),
     /slack_file_unavailable/);
   const noScope = createSlackFileLoader(token, async (url) => {
     assert.equal(String(url), metadataUrl);
     return Response.json({ ok: false, error: "missing_scope" });
   });
-  await assert.rejects(() => noScope(channelId, [fileId], new AbortController().signal),
+  await assert.rejects(() => noScope(fileMessage, [fileId], new AbortController().signal),
     /slack_files_missing_scope/);
 });
 
 test("limits file count, combined bytes and actual streamed bytes", async () => {
   const count = createSlackFileLoader(token, async () => assert.fail("over-limit download requested"));
-  await assert.rejects(() => count(channelId, [fileId, "F2", "F3", "F4"], new AbortController().signal),
+  await assert.rejects(() => count(fileMessage, [fileId, "F2", "F3", "F4"], new AbortController().signal),
     /slack_file_count_limit/);
   let canceled = false;
   const oversized = createSlackFileLoader(token, async (url) => String(url) === metadataUrl
@@ -167,7 +173,7 @@ test("limits file count, combined bytes and actual streamed bytes", async () => 
       start(controller) { controller.enqueue(Buffer.from("123456")); },
       cancel() { canceled = true; },
     })));
-  await assert.rejects(() => oversized(channelId, [fileId], new AbortController().signal),
+  await assert.rejects(() => oversized(fileMessage, [fileId], new AbortController().signal),
     /slack_file_byte_limit/);
   assert.equal(canceled, true);
 
@@ -180,7 +186,7 @@ test("limits file count, combined bytes and actual streamed bytes", async () => 
     return fileResponse({ id: "FOTHER", size: 1,
       url_private_download: "https://files.slack.com/files-pri/TEXAMPLE-FOTHER/download/other.txt" });
   });
-  await assert.rejects(() => full(channelId, [fileId, "FOTHER"], new AbortController().signal),
+  await assert.rejects(() => full(fileMessage, [fileId, "FOTHER"], new AbortController().signal),
     /slack_file_unavailable/);
   assert.deepEqual(urls, [metadataUrl, fileUrl, "https://slack.com/api/files.info?file=FOTHER"]);
 });
@@ -192,9 +198,9 @@ test("honors Slack file rate limits across jobs without retrying immediately", a
   ]) {
     let calls = 0;
     const load = createSlackFileLoader(token, async () => { calls++; return result; });
-    await assert.rejects(() => load(channelId, [fileId, "FOTHER"], new AbortController().signal),
+    await assert.rejects(() => load(fileMessage, [fileId, "FOTHER"], new AbortController().signal),
       /slack_files_rate_limited/);
-    await assert.rejects(() => load(channelId, [fileId], new AbortController().signal),
+    await assert.rejects(() => load(fileMessage, [fileId], new AbortController().signal),
       /slack_files_rate_limited/);
     assert.equal(calls, 1);
   }
@@ -212,7 +218,7 @@ test("cancels a download when the generation budget is aborted", async () => {
       },
     }));
   });
-  const running = load(channelId, [fileId], controller.signal);
+  const running = load(fileMessage, [fileId], controller.signal);
   await started.promise;
   controller.abort();
   await assert.rejects(running, { name: "AbortError" });
@@ -260,10 +266,9 @@ test("signed Slack attachments reach the selected model and replies stay in the 
 
   const load = createSlackFileLoader(token, async (url) =>
     String(url) === metadataUrl ? fileResponse({
-      ims: undefined,
       shares: {
         public: { CEXAMPLE: [{ ts: "1700000000.000002", thread_ts: threadTs }] },
-        private: { [channelId]: [{ ts: "1700000000.000002", thread_ts: threadTs }] },
+        private: { [channelId]: [{ ts: "1700000000.000002" }] },
       },
     }) : new Response("hello"));
   const prompts = [];
@@ -302,6 +307,6 @@ test("signed Slack attachments reach the selected model and replies stay in the 
 test("demo reports the file count without calling a model", async () => {
   const signal = new AbortController().signal;
   const [file] = await createSlackFileLoader(token, async (url) =>
-    String(url) === metadataUrl ? fileResponse() : new Response("hello"))(channelId, [fileId], signal);
+    String(url) === metadataUrl ? fileResponse() : new Response("hello"))(fileMessage, [fileId], signal);
   assert.match(await respond({ files: [file] }, signal), /received 1 file/);
 });

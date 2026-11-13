@@ -15,6 +15,10 @@ export const respond: Agent = async ({ files }) => files?.length
 
 const maxOutputTokens = 4096;
 const unavailableReply = "The AI provider could not answer right now. Please try again later.";
+const declinedReply = "The AI provider declined this request. Try a different question.";
+const geminiBlockedReasons = new Set([
+  "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT",
+]);
 
 function modelRequest({ provider, model, instructions, apiKey }: ModelConfig, text: string, files: readonly ModelFile[]): {
   url: string; headers: Record<string, string>; body: object;
@@ -87,8 +91,9 @@ function markIncomplete(text: string, limited: boolean): string {
 function modelText(provider: ModelConfig["provider"], data: Record<string, unknown> | undefined): string {
   switch (provider) {
     case "openai": {
-      const limited = data?.status === "incomplete" &&
-        asRecord(data.incomplete_details)?.reason === "max_output_tokens";
+      const incomplete = data?.status === "incomplete" ? asRecord(data.incomplete_details)?.reason : undefined;
+      if (incomplete === "content_filter") return declinedReply;
+      const limited = incomplete === "max_output_tokens";
       if (data?.status !== "completed" && !limited) return "";
       const text = records(data?.output)
         .filter((item) => item.type === "message" && item.role === "assistant")
@@ -101,16 +106,21 @@ function modelText(provider: ModelConfig["provider"], data: Record<string, unkno
       return markIncomplete(text, limited);
     }
     case "claude": {
+      if (data?.stop_reason === "refusal") return declinedReply;
       const text = records(data?.content)
         .map((part) => part.type === "text" && typeof part.text === "string" ? part.text : "").join("");
       return markIncomplete(text, data?.stop_reason === "max_tokens" ||
         data?.stop_reason === "model_context_window_exceeded");
     }
     case "gemini": {
+      const blockReason = asRecord(data?.promptFeedback)?.blockReason;
+      if (typeof blockReason === "string" && blockReason !== "BLOCK_REASON_UNSPECIFIED") return declinedReply;
       const candidate = Array.isArray(data?.candidates) ? asRecord(data.candidates[0]) : undefined;
+      const finishReason = candidate?.finishReason;
+      if (typeof finishReason === "string" && geminiBlockedReasons.has(finishReason)) return declinedReply;
       const text = records(asRecord(candidate?.content)?.parts)
         .map((part) => part.thought !== true && typeof part.text === "string" ? part.text : "").join("");
-      return markIncomplete(text, candidate?.finishReason === "MAX_TOKENS");
+      return markIncomplete(text, finishReason === "MAX_TOKENS");
     }
   }
 }
@@ -133,7 +143,10 @@ async function requestModel(
     if (!response.ok) {
       void response.body?.cancel().catch(() => {});
       console.warn(JSON.stringify({ event: "ai_provider_http_error", provider: config.provider, status: response.status }));
-      if (response.status === 429) return "The AI provider is limiting requests. Please try again later.";
+      if (response.status === 402) return "Ask the app owner to check billing for the AI provider.";
+      if (response.status === 429) {
+        return "The AI provider reached a rate or usage limit. Try again later or ask the app owner to check the provider quota and billing.";
+      }
       if (files.length && (response.status === 400 || response.status === 413)) {
         return "The AI provider rejected this request. Try a smaller attachment or ask the app owner to check the model's file support.";
       }
