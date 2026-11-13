@@ -201,25 +201,115 @@ test("a slow model returns a timeout reply before the worker retries the job", a
   assert.doesNotMatch(JSON.stringify(log.mock.calls[0].arguments), /private timeout details/);
 });
 
-test("attachments stay local and long model replies fit in one Slack message", async () => {
-  const files = [{ name: "secret.txt", mimeType: "text/plain", bytes: Buffer.from("private file bytes") }];
-  const channelInput = { ...input, channelId: "CEXAMPLE" };
-  const caption = "<@UBOT> " + input.text;
+const pdfBytes = Buffer.from("%PDF-1.7\nexample");
+const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x10]);
+const textBytes = Buffer.from("Пример\nLine two");
+const attachedFiles = [
+  { name: "brief", mimeType: "application/pdf", bytes: pdfBytes },
+  { name: "chart.png", mimeType: "image/png", bytes: pngBytes },
+  { name: "notes.md", mimeType: "text/markdown", bytes: textBytes },
+];
+
+for (const fixture of providerCases) {
+  test(fixture.provider + " receives the attachment bytes and text in the user message", async () => {
+    const caption = "Compare these attachments.";
+    const pdfData = pdfBytes.toString("base64");
+    const pngData = pngBytes.toString("base64");
+    const fileText = "File: notes.md\nПример\nLine two";
+    const calls = [];
+    const agent = createAgent(configured(fixture.provider, fixture.model), async (url, options) => {
+      assert.equal(url, fixture.url);
+      assert.deepEqual(options.headers, { ...fixture.headers, "content-type": "application/json" });
+      assert.doesNotMatch(options.body, /DEXAMPLE|UEXAMPLE|xoxb-example|files\.slack\.com/);
+      calls.push(JSON.parse(options.body));
+      return Response.json(fixture.response);
+    });
+    assert.equal(await agent({ ...input, text: caption, files: attachedFiles }, signal), "Hello!");
+    assert.equal(calls.length, 1);
+    const expected = { ...fixture.body };
+    switch (fixture.provider) {
+      case "openai":
+        expected.input = [{ role: "user", content: [
+          { type: "input_text", text: caption },
+          { type: "input_file", filename: "brief.pdf", file_data: "data:application/pdf;base64," + pdfData },
+          { type: "input_image", image_url: "data:image/png;base64," + pngData, detail: "auto" },
+          { type: "input_text", text: fileText },
+        ] }];
+        break;
+      case "claude":
+        expected.messages = [{ role: "user", content: [
+          { type: "text", text: caption },
+          { type: "document", title: "brief", source: { type: "base64", media_type: "application/pdf", data: pdfData } },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: pngData } },
+          { type: "text", text: fileText },
+        ] }];
+        break;
+      case "gemini":
+        expected.contents = [{ role: "user", parts: [
+          { text: caption },
+          { inlineData: { mimeType: "application/pdf", data: pdfData } },
+          { inlineData: { mimeType: "image/png", data: pngData } },
+          { text: fileText },
+        ] }];
+        break;
+    }
+    assert.deepEqual(calls[0], expected);
+  });
+}
+
+test("files without a question are summarized and long replies fit in Slack", async () => {
+  const files = [attachedFiles[2]];
+  const channelInput = { ...input, channelId: "CEXAMPLE", text: "<@UBOT>" };
   let requests = 0;
   const agent = createAgent(configured("openai", "test-model"), async (_url, options) => {
     requests++;
-    assert.equal(JSON.parse(options.body).input, caption);
-    assert.doesNotMatch(options.body, /secret\.txt|private file bytes|UEXAMPLE|DEXAMPLE/);
+    const [message] = JSON.parse(options.body).input;
+    assert.deepEqual(message.content, [
+      { type: "input_text", text: "Summarize the attached files." },
+      { type: "input_text", text: "File: notes.md\nПример\nLine two" },
+    ]);
     return Response.json(openaiReply("😀".repeat(3000)));
   });
-  assert.match(await agent({ ...input, text: "", files }, signal), /Paste the relevant text/);
-  assert.match(await agent({ ...channelInput, text: "<@UBOT>", files }, signal), /Paste the relevant text/);
-  assert.equal(await agent({ ...channelInput, text: "<@UBOT>" }, signal), "What would you like help with?");
-  assert.equal(requests, 0);
-  const reply = await agent({ ...channelInput, text: caption, files }, signal);
-  assert(reply.length <= 4000);
-  assert.equal(reply.isWellFormed(), true);
-  assert.match(reply, /…\n\nI did not send the attached files to the model\.$/);
+  assert.equal(await agent(channelInput, signal), "What would you like help with?");
+  for (const message of [{ ...input, text: "" }, channelInput]) {
+    const reply = await agent({ ...message, files }, signal);
+    assert(reply.length <= 4000);
+    assert.equal(reply.isWellFormed(), true);
+    assert.match(reply, /…$/);
+  }
+  assert.equal(requests, 2);
+});
+
+test("a rejected attachment prevents sending any part of the request", async () => {
+  const file = { name: "attachment", mimeType: "text/plain", bytes: Buffer.from("safe") };
+  const agent = createAgent(configured("openai", "test-model"), async () => {
+    assert.fail("the model received a partial attachment set");
+  });
+  for (const [change, reply] of [
+    [{ mimeType: "application/zip" }, /PDF, JPEG, PNG, WebP/],
+    [{ bytes: Buffer.alloc(0) }, /empty/],
+    [{ bytes: Buffer.from([0xc0, 0xaf]) }, /UTF-8/],
+    [{ bytes: Buffer.from("text\0") }, /UTF-8/],
+    [{ bytes: Buffer.alloc(64 * 1024, "a") }, /64 KiB/],
+    [{ mimeType: "image/png" }, /does not match its file format/],
+  ]) {
+    assert.match(await agent({ ...input, files: [file, { ...file, ...change }] }, signal), reply);
+  }
+});
+
+test("Claude accepts an image at its encoded size limit and rejects a larger image", async () => {
+  const bytes = Buffer.alloc(7_500_001);
+  bytes.set(pngBytes);
+  const file = { name: "chart.png", mimeType: "image/png", bytes };
+  let requests = 0;
+  const agent = createAgent(configured("claude", "test-model"), async (_url, options) => {
+    requests++;
+    assert.equal(JSON.parse(options.body).messages[0].content[1].source.data.length, 10_000_000);
+    return Response.json({ content: [{ type: "text", text: "Image accepted" }] });
+  });
+  assert.match(await agent({ ...input, files: [file] }, signal), /too large for Claude/);
+  const atLimit = { ...file, bytes: bytes.subarray(0, 7_500_000) };
+  assert.equal(await agent({ ...input, files: [atLimit] }, signal), "Image accepted");
   assert.equal(requests, 1);
 });
 

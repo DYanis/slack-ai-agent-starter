@@ -82,7 +82,7 @@ export function parseSlackEvent(value: unknown, installation: Installation, file
   if (!mention && !dm) return { kind: "ignore" };
   const broadcast = dm && event.subtype === "thread_broadcast" &&
     typeof event.thread_ts === "string" && threadTs !== messageTs;
-  const fileShare = filesEnabled && event.subtype === "file_share";
+  const fileShare = event.subtype === "file_share";
   if (event.subtype !== undefined && !broadcast && !fileShare) return { kind: "ignore" };
 
   const fileIds = new Set<string>();
@@ -96,7 +96,7 @@ export function parseSlackEvent(value: unknown, installation: Installation, file
       if (fileIds.size > maxSlackFiles) break;
     }
   }
-  if (fileShare && !fileIds.size) return { kind: "ignore" };
+  if (filesEnabled && fileShare && !fileIds.size) return { kind: "ignore" };
 
   const text = fileIds.size && event.text === undefined ? "" : event.text;
   if (typeof text !== "string" || text.length > textLimit || text.includes("\0") ||

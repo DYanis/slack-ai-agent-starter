@@ -1,4 +1,6 @@
 import type { ModelConfig } from "./config.js";
+import { prepareModelFiles } from "./model-files.js";
+import type { ModelFile } from "./model-files.js";
 import { asRecord, maxSlackReplyLength } from "./slack.js";
 import type { SlackInput } from "./slack.js";
 import type { SlackFile } from "./slack-files.js";
@@ -14,29 +16,60 @@ export const respond: Agent = async ({ files }) => files?.length
 const maxOutputTokens = 4096;
 const unavailableReply = "The AI provider could not answer right now. Please try again later.";
 
-function modelRequest({ provider, model, instructions, apiKey }: ModelConfig, text: string): {
+function modelRequest({ provider, model, instructions, apiKey }: ModelConfig, text: string, files: readonly ModelFile[]): {
   url: string; headers: Record<string, string>; body: object;
 } {
   switch (provider) {
-    case "openai":
+    case "openai": {
+      const input = files.length ? [{ role: "user", content: [
+        { type: "input_text", text },
+        ...files.map((file) => {
+          if (file.kind === "text") return { type: "input_text", text: file.text };
+          if (file.kind === "pdf") return {
+            type: "input_file",
+            filename: file.name.toLowerCase().endsWith(".pdf") ? file.name : file.name + ".pdf",
+            file_data: `data:application/pdf;base64,${file.data}`,
+          };
+          return { type: "input_image", image_url: `data:${file.mimeType};base64,${file.data}`, detail: "auto" };
+        }),
+      ] }] : text;
       return {
         url: "https://api.openai.com/v1/responses",
         headers: { authorization: `Bearer ${apiKey}` },
-        body: { model, instructions, input: text, max_output_tokens: maxOutputTokens, store: false },
+        body: { model, instructions, input, max_output_tokens: maxOutputTokens, store: false },
       };
-    case "claude":
+    }
+    case "claude": {
+      const content = files.length ? [
+        { type: "text", text },
+        ...files.map((file) => {
+          if (file.kind === "text") return { type: "text", text: file.text };
+          if (file.kind === "pdf") return {
+            type: "document", title: file.name, source: { type: "base64", media_type: "application/pdf", data: file.data },
+          };
+          return { type: "image", source: { type: "base64", media_type: file.mimeType, data: file.data } };
+        }),
+      ] : text;
       return {
         url: "https://api.anthropic.com/v1/messages",
         headers: { authorization: `Bearer ${apiKey}`, "anthropic-version": "2026-10-21" },
-        body: { model, system: instructions, messages: [{ role: "user", content: text }], max_tokens: maxOutputTokens },
+        body: { model, system: instructions, messages: [{ role: "user", content }], max_tokens: maxOutputTokens },
       };
+    }
     case "gemini":
       return {
         url: `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
         headers: { "x-goog-api-key": apiKey },
         body: {
           systemInstruction: { parts: [{ text: instructions }] },
-          contents: [{ role: "user", parts: [{ text }] }],
+          contents: [{ role: "user", parts: [
+            { text },
+            ...files.map((file) => {
+              if (file.kind === "text") return { text: file.text };
+              const mimeType = file.kind === "pdf" ? "application/pdf" : file.mimeType;
+              return { inlineData: { mimeType, data: file.data } };
+            }),
+          ] }],
           generationConfig: { maxOutputTokens },
         },
       };
@@ -83,12 +116,13 @@ function modelText(provider: ModelConfig["provider"], data: Record<string, unkno
 }
 
 async function requestModel(
-  config: ModelConfig, text: string, timeoutMs: number, signal: AbortSignal, request: typeof fetch,
+  config: ModelConfig, text: string, files: readonly ModelFile[], signal: AbortSignal, request: typeof fetch,
 ): Promise<string> {
   signal.throwIfAborted();
-  const timeout = AbortSignal.timeout(timeoutMs);
+  // Leave room within the worker deadline for Slack file downloads.
+  const timeout = AbortSignal.timeout(files.length ? 14_000 : 22_000);
   const requestSignal = AbortSignal.any([signal, timeout]);
-  const { url, headers, body } = modelRequest(config, text);
+  const { url, headers, body } = modelRequest(config, text, files);
   try {
     const response = await request(url, {
       method: "POST", redirect: "error", signal: requestSignal,
@@ -100,6 +134,9 @@ async function requestModel(
       void response.body?.cancel().catch(() => {});
       console.warn(JSON.stringify({ event: "ai_provider_http_error", provider: config.provider, status: response.status }));
       if (response.status === 429) return "The AI provider is limiting requests. Please try again later.";
+      if (files.length && (response.status === 400 || response.status === 413)) {
+        return "The AI provider rejected this request. Try a smaller attachment or ask the app owner to check the model's file support.";
+      }
       if ([400, 401, 403, 404].includes(response.status)) {
         return "The AI provider rejected the request. Ask the app owner to check the model and API key.";
       }
@@ -126,18 +163,16 @@ export function createAgent(config: ModelConfig | undefined, request: typeof fet
   return async ({ channelId, text, files }, signal) => {
     const message = text.trim();
     const bareAppMention = !channelId.startsWith("D") && /^<@[UW][A-Z0-9]+>$/.test(message);
-    if (!message || bareAppMention) {
-      return files?.length
-        ? "I received your files. Paste the relevant text into a message for me to read it."
-        : "What would you like help with?";
-    }
-    const attachmentNote = files?.length ? "\n\nI did not send the attached files to the model." : "";
-    // Leave room within the worker deadline, including the file download budget.
-    const timeoutMs = files?.length ? 14_000 : 22_000;
-    const reply = await requestModel(config, message, timeoutMs, signal, request);
+    const prompt = bareAppMention ? "" : message;
+    if (!prompt && !files?.length) return "What would you like help with?";
     signal.throwIfAborted();
-    const limit = maxSlackReplyLength - attachmentNote.length;
-    if (reply.length <= limit) return reply + attachmentNote;
-    return reply.slice(0, limit - 1).replace(/[\uD800-\uDBFF]$/, "") + "…" + attachmentNote;
+    const prepared = prepareModelFiles(files ?? [], config.provider);
+    if ("message" in prepared) return prepared.message;
+    const reply = await requestModel(
+      config, prompt || "Summarize the attached files.", prepared.parts, signal, request,
+    );
+    signal.throwIfAborted();
+    if (reply.length <= maxSlackReplyLength) return reply;
+    return reply.slice(0, maxSlackReplyLength - 1).replace(/[\uD800-\uDBFF]$/, "") + "…";
   };
 }

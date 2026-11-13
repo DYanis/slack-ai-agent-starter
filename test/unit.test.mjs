@@ -76,7 +76,7 @@ test("accepts a human DM reply shared with the main conversation", () => {
     "ignore");
 });
 
-test("file support is opt-in and accepts files only on eligible human messages", () => {
+test("file support accepts files only on eligible human messages and can be disabled", () => {
   const files = [{ id: "FDEMO", url_private: "https://example.invalid" }, { id: "FDEMO" }];
   const mention = { ...envelope, event: { ...envelope.event, files } };
   const fileOnly = {
@@ -85,6 +85,11 @@ test("file support is opt-in and accepts files only on eligible human messages",
   };
   assert.equal(parseSlackEvent(mention, installation).input.fileIds, undefined);
   assert.equal(parseSlackEvent({ ...envelope, event: fileOnly }, installation).kind, "ignore");
+  const caption = parseSlackEvent({
+    ...envelope, event: { ...fileOnly, subtype: "file_share", text: "Just the caption" },
+  }, installation, false);
+  assert.equal(caption.input.text, "Just the caption");
+  assert.equal(caption.input.fileIds, undefined);
   assert.deepEqual(parseSlackEvent(mention, installation, true).input.fileIds, ["FDEMO"]);
   for (const event of [
     fileOnly, { ...fileOnly, text: undefined }, { ...fileOnly, subtype: "file_share", upload: false },
@@ -129,7 +134,7 @@ test("configuration rejects empty credentials, bad database URLs and excess conc
     SLACK_TEAM_ID: installation.teamId, SLACK_SIGNING_SECRET: secret, SLACK_BOT_TOKEN: token,
   };
   assert.equal(readConfig(env).concurrency, 4);
-  assert.equal(readConfig(env).filesEnabled, false);
+  assert.equal(readConfig(env).filesEnabled, true);
   assert.equal(readConfig({ ...env, SLACK_FILES_ENABLED: "true" }).filesEnabled, true);
   assert.equal(readConfig({ ...env, SLACK_FILES_ENABLED: "false" }).filesEnabled, false);
   assert.throws(() => readConfig({ ...env, SLACK_FILES_ENABLED: "yes" }), /SLACK_FILES_ENABLED/);
@@ -319,9 +324,13 @@ test("queued files respect the worker flag and incomplete downloads get a reply"
   await processJob(queue, withFiles, noAgent, deliver, async () => {
     throw new Error("file missing");
   });
+  await processJob(queue, withFiles, noAgent, deliver, async () => {
+    throw new Error("slack_files_missing_scope");
+  });
   assert.equal(replies[0], "text reply");
   assert.match(replies[1], /File support is turned off/);
   assert.match(replies[2], /couldn't read all the attached files/);
+  assert.match(replies[3], /grant files:read and reinstall/);
 });
 
 test("finishes an in-flight claim when shutdown starts", async () => {
