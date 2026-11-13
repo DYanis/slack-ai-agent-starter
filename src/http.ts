@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { isSignedRequest, parseSlackEvent } from "./slack.js";
+import { hasFreshSignatureHeaders, isSignedRequest, parseSlackEvent } from "./slack.js";
 import type { Installation, SlackInput } from "./slack.js";
 
 const maxBodyBytes = 256 * 1024;
@@ -9,6 +9,7 @@ const ackBudgetMs = 2600;
 type Options = {
   installation: Installation;
   signingSecret: string;
+  filesEnabled?: boolean;
   enqueue: (input: SlackInput) => Promise<boolean>;
   ready: () => Promise<void>;
   wake: () => void;
@@ -34,6 +35,20 @@ async function readBody(request: IncomingMessage): Promise<Buffer | undefined> {
 }
 
 export function createHttpServer(options: Options) {
+  let lastCheck: { ready: boolean; expiresAt: number } | undefined;
+  let checking: Promise<boolean> | undefined;
+  async function isReady() {
+    if (lastCheck && performance.now() < lastCheck.expiresAt) return lastCheck.ready;
+    checking ??= Promise.resolve().then(options.ready)
+      .then(() => true, () => false)
+      .then((ready) => {
+        lastCheck = { ready, expiresAt: performance.now() + 1000 };
+        checking = undefined;
+        return ready;
+      });
+    return checking;
+  }
+
   return createServer({
     headersTimeout: 3000,
     requestTimeout: 3000,
@@ -44,12 +59,9 @@ export function createHttpServer(options: Options) {
       return send(response, 200, { status: "ok" });
     }
     if (request.method === "GET" && request.url === "/health/ready") {
-      try {
-        await options.ready();
-        return send(response, 200, { status: "ready" });
-      } catch {
-        return send(response, 503, { status: "unavailable" });
-      }
+      return await isReady()
+        ? send(response, 200, { status: "ready" })
+        : send(response, 503, { status: "unavailable" });
     }
     if (request.method !== "POST" || request.url !== "/slack/events") {
       return send(response, 404);
@@ -61,7 +73,8 @@ export function createHttpServer(options: Options) {
     try {
       const timestamp = request.headers["x-slack-request-timestamp"];
       const signature = request.headers["x-slack-signature"];
-      if (typeof timestamp !== "string" || typeof signature !== "string") {
+      if (typeof timestamp !== "string" || typeof signature !== "string" ||
+          !hasFreshSignatureHeaders(timestamp, signature)) {
         response.setHeader("connection", "close");
         return send(response, 401);
       }
@@ -80,7 +93,7 @@ export function createHttpServer(options: Options) {
       } catch {
         return send(response, 400);
       }
-      const event = parseSlackEvent(payload, options.installation);
+      const event = parseSlackEvent(payload, options.installation, options.filesEnabled);
       if (event.kind === "challenge") return send(response, 200, { challenge: event.challenge });
       if (event.kind === "input") {
         const inserted = await options.enqueue(event.input);
@@ -90,6 +103,7 @@ export function createHttpServer(options: Options) {
       }
       send(response, 200);
     } catch {
+      if (request.destroyed && !request.complete) return;
       console.error(JSON.stringify({ event: "slack_ingress_unavailable" }));
       send(response, 503);
     } finally {

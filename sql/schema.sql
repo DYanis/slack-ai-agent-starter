@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS slack_jobs (
   UNIQUE (channel_id, message_ts)
 );
 
+ALTER TABLE slack_jobs ADD COLUMN IF NOT EXISTS file_ids text[];
+
 CREATE UNIQUE INDEX IF NOT EXISTS slack_jobs_active_thread
   ON slack_jobs (channel_id, thread_ts)
   WHERE status IN ('working', 'sending');

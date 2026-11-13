@@ -17,9 +17,16 @@ export function readConfig(env: NodeJS.ProcessEnv) {
 
   const databaseUrl = required("DATABASE_URL", /^postgres(?:ql)?:\/\//);
   try {
-    new URL(databaseUrl);
+    const url = new URL(databaseUrl);
+    if (!url.hostname && url.pathname.length < 2 && !url.searchParams.size) {
+      throw new Error("Missing database target");
+    }
   } catch {
     throw new Error("Invalid DATABASE_URL");
+  }
+  const filesEnabled = env.SLACK_FILES_ENABLED ?? "false";
+  if (filesEnabled !== "true" && filesEnabled !== "false") {
+    throw new Error("Invalid SLACK_FILES_ENABLED");
   }
 
   return {
@@ -28,6 +35,7 @@ export function readConfig(env: NodeJS.ProcessEnv) {
     teamId: required("SLACK_TEAM_ID", /^T[A-Z0-9]+$/),
     signingSecret: required("SLACK_SIGNING_SECRET", /^[A-Za-z0-9]+$/),
     botToken: required("SLACK_BOT_TOKEN", /^xoxb-[A-Za-z0-9-]+$/),
+    filesEnabled: filesEnabled === "true",
     concurrency: integer("WORKER_CONCURRENCY", 4, 8),
     port: integer("PORT", 3000, 65535),
   };

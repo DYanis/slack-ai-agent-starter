@@ -5,6 +5,7 @@ import { readConfig } from "./config.js";
 import { createHttpServer } from "./http.js";
 import { Queue } from "./queue.js";
 import { postSlackReply } from "./slack.js";
+import { createSlackFileLoader } from "./slack-files.js";
 import { startWorker } from "./worker.js";
 
 async function start() {
@@ -13,6 +14,7 @@ async function start() {
     connectionString: config.databaseUrl,
     connectionTimeoutMillis: 1000,
     statement_timeout: 1500,
+    query_timeout: 1550,
     idle_in_transaction_session_timeout: 3000,
   };
   // Keep Slack acknowledgment capacity available when all workers are busy.
@@ -45,10 +47,12 @@ async function start() {
       ? error.message : "database_initialization_failed");
   }
   const worker = startWorker(queue, config.concurrency, respond,
-    (job, reply) => postSlackReply(config.botToken, job, reply));
+    (job, reply) => postSlackReply(config.botToken, job, reply),
+    config.filesEnabled ? createSlackFileLoader(config.botToken) : undefined);
   const server = createHttpServer({
     installation: config,
     signingSecret: config.signingSecret,
+    filesEnabled: config.filesEnabled,
     enqueue: (input) => ingress.enqueue(input),
     ready: () => ingress.ready(),
     wake: worker.wake,
