@@ -11,10 +11,9 @@ import { startWorker } from "./worker.js";
 
 async function start() {
   const config = readConfig(process.env);
-  let botUserId: string;
   for (let attempt = 1; ; attempt++) {
     try {
-      botUserId = await verifySlackBot(config.botToken, config);
+      await verifySlackBot(config.botToken, config);
       break;
     } catch (error) {
       if (attempt >= 3 || !(error instanceof SlackAuthUnavailable)) throw error;
@@ -63,7 +62,7 @@ async function start() {
     (job, reply) => postSlackReply(config.botToken, job, reply),
     config.filesEnabled ? createSlackFileLoader(config.botToken) : undefined);
   const server = createHttpServer({
-    installation: { appId: config.appId, teamId: config.teamId, botUserId },
+    installation: { appId: config.appId, teamId: config.teamId, botUserId: config.botUserId },
     signingSecret: config.signingSecret,
     filesEnabled: config.filesEnabled,
     enqueue: (input) => ingress.enqueue(input),

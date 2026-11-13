@@ -7,6 +7,7 @@ const slackEnv = {
   DATABASE_URL: "postgresql://localhost:5432/agent",
   SLACK_APP_ID: "AEXAMPLE",
   SLACK_TEAM_ID: "TEXAMPLE",
+  SLACK_BOT_USER_ID: "UBOT",
   SLACK_SIGNING_SECRET: "exampleSignSecret",
   SLACK_BOT_TOKEN: "xoxb-example",
 };
@@ -146,8 +147,8 @@ test("provider errors give safe replies and perform no immediate retries", async
 test("handles blocked or empty content, explicit refusal and an output limit", async () => {
   const blocked = [
     ["gemini", { promptFeedback: { blockReason: "SAFETY" } }],
-    ["gemini", { candidates: [{ content: { parts: [{ text: "Partial blocked text" }] },
-      finishReason: "PROHIBITED_CONTENT" }] }],
+    ...["PROHIBITED_CONTENT", "ESCALATION", "PUP_LIMITED_DISABLED", "IMAGE_RECITATION"].map((finishReason) =>
+      ["gemini", { candidates: [{ content: { parts: [{ text: "Partial blocked text" }] }, finishReason }] }]),
     ["claude", { content: [], stop_reason: "refusal", stop_details: { explanation: "Private reason" } }],
     ["claude", { content: [{ type: "text", text: "Partial blocked text" }], stop_reason: "refusal" }],
     ["openai", { ...openaiReply("Partial blocked text"), status: "incomplete",
@@ -168,6 +169,7 @@ test("handles blocked or empty content, explicit refusal and an output limit", a
       incomplete_details: { reason: "max_output_tokens" } }],
     ["claude", { content: [{ type: "text", text: "Partial response" }], stop_reason: "max_tokens" }],
     ["gemini", { candidates: [{ content: { parts: [{ text: "Partial response" }] }, finishReason: "MAX_TOKENS" }] }],
+    ["gemini", { candidates: [{ content: { parts: [{ text: "Partial response" }] }, finishReason: "CONTINUATION" }] }],
   ];
   for (const [provider, reply] of limitedReplies) {
     assert.equal(await createAgent(configured(provider, "test-model"),

@@ -17,7 +17,8 @@ const maxOutputTokens = 4096;
 const unavailableReply = "The AI provider could not answer right now. Please try again later.";
 const declinedReply = "The AI provider declined this request. Try a different question.";
 const geminiBlockedReasons = new Set([
-  "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT",
+  "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "ESCALATION", "PUP_LIMITED_DISABLED",
+  "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION",
 ]);
 
 function modelRequest({ provider, model, instructions, apiKey }: ModelConfig, text: string, files: readonly ModelFile[]): {
@@ -120,7 +121,7 @@ function modelText(provider: ModelConfig["provider"], data: Record<string, unkno
       if (typeof finishReason === "string" && geminiBlockedReasons.has(finishReason)) return declinedReply;
       const text = records(asRecord(candidate?.content)?.parts)
         .map((part) => part.thought !== true && typeof part.text === "string" ? part.text : "").join("");
-      return markIncomplete(text, finishReason === "MAX_TOKENS");
+      return markIncomplete(text, finishReason === "MAX_TOKENS" || finishReason === "CONTINUATION");
     }
   }
 }

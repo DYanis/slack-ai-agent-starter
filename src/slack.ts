@@ -10,7 +10,7 @@ export type SlackInput = {
   fileIds?: readonly string[];
 };
 
-export type Installation = { appId: string; teamId: string; botUserId?: string };
+export type Installation = { appId: string; teamId: string; botUserId: string };
 
 const slackTimestamp = /^\d{10,12}\.\d{6}$/;
 const textLimit = 8000;
@@ -31,9 +31,13 @@ export class SlackAuthUnavailable extends Error {
   }
 }
 
+const temporarySlackAuthErrors = new Set([
+  "fatal_error", "internal_error", "org_login_required", "service_unavailable", "team_added_to_org",
+]);
+
 export async function verifySlackBot(
   token: string, installation: Installation, request: typeof fetch = fetch,
-): Promise<string> {
+): Promise<void> {
   let response: Response;
   let data: Record<string, unknown> | undefined;
   try {
@@ -56,19 +60,18 @@ export async function verifySlackBot(
     throw new SlackAuthUnavailable(retryAfter(response.headers));
   }
   if (!response.ok || typeof data?.ok !== "boolean" ||
-      data.error === "internal_error" || data.error === "service_unavailable") {
+      (typeof data.error === "string" && temporarySlackAuthErrors.has(data.error))) {
     throw new SlackAuthUnavailable();
   }
   if (!data.ok) throw new Error("slack_bot_token_invalid");
-  if (data.team_id !== installation.teamId || data.is_enterprise_install === true ||
-      (data.app_id !== undefined && data.app_id !== installation.appId)) {
-    throw new Error("slack_installation_mismatch");
-  }
   if (typeof data.user_id !== "string" || !/^[UW][A-Z0-9]+$/.test(data.user_id) ||
       typeof data.bot_id !== "string" || !/^B[A-Z0-9]+$/.test(data.bot_id)) {
     throw new Error("slack_bot_token_invalid");
   }
-  return data.user_id;
+  if (data.team_id !== installation.teamId || data.user_id !== installation.botUserId ||
+      data.is_enterprise_install === true || (data.app_id !== undefined && data.app_id !== installation.appId)) {
+    throw new Error("slack_installation_mismatch");
+  }
 }
 
 export function hasFreshSignatureHeaders(timestamp: string, signature: string, now = Date.now()): boolean {
@@ -128,7 +131,7 @@ export function parseSlackEvent(value: unknown, installation: Installation, file
       typeof threadTs !== "string" || !slackTimestamp.test(threadTs) ||
       BigInt(threadTs.replace(".", "")) > BigInt(messageTs.replace(".", ""))) return { kind: "ignore" };
 
-  if (installation.botUserId && Array.isArray(payload.authorizations)) {
+  if (Array.isArray(payload.authorizations)) {
     const bots = payload.authorizations.map(asRecord).filter((authorization) =>
       authorization?.is_bot === true && typeof authorization.user_id === "string" &&
       (authorization.team_id == null || authorization.team_id === installation.teamId),

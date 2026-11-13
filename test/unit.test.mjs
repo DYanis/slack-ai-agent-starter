@@ -8,7 +8,7 @@ import { createHttpServer } from "../dist/http.js";
 import { isSignedRequest, parseSlackEvent, postSlackReply, verifySlackBot } from "../dist/slack.js";
 import { processJob, startWorker } from "../dist/worker.js";
 
-const installation = { appId: "AEXAMPLE", teamId: "TEXAMPLE" };
+const installation = { appId: "AEXAMPLE", teamId: "TEXAMPLE", botUserId: "UBOT" };
 const secret = "exampleSignSecret";
 const time = 1_700_000_000_000;
 const body = Buffer.from('{"test":"é"}');
@@ -130,21 +130,20 @@ test("ignores other installations, Slack Connect, bots, edits, out-of-scope mess
 });
 
 test("uses the verified bot user to reject explicit authorization mismatches and its own messages", () => {
-  const verified = { ...installation, botUserId: "UBOT" };
   const accepted = [
     undefined, [{ is_bot: false, user_id: "UINSTALLER" }],
     [{ is_bot: true, user_id: "UBOT", team_id: null }],
     [{ is_bot: true, user_id: "UBOT", team_id: installation.teamId }],
   ];
   for (const authorizations of accepted) {
-    assert.equal(parseSlackEvent({ ...envelope, authorizations }, verified).kind, "input");
+    assert.equal(parseSlackEvent({ ...envelope, authorizations }, installation).kind, "input");
   }
   const authorizations = [{ is_bot: true, user_id: "UOTHERBOT", team_id: installation.teamId }];
-  assert.equal(parseSlackEvent({ ...envelope, authorizations }, verified).kind, "ignore");
-  assert.equal(parseSlackEvent({ ...envelope, event: { ...envelope.event, user: "UBOT" } }, verified).kind,
+  assert.equal(parseSlackEvent({ ...envelope, authorizations }, installation).kind, "ignore");
+  assert.equal(parseSlackEvent({ ...envelope, event: { ...envelope.event, user: "UBOT" } }, installation).kind,
     "ignore");
   const enterpriseMember = { ...envelope, event: { ...envelope.event, user_team: "EEXAMPLE" } };
-  assert.equal(parseSlackEvent(enterpriseMember, verified).kind, "input");
+  assert.equal(parseSlackEvent(enterpriseMember, installation).kind, "input");
 });
 
 test("verifies the Slack bot token before binding the installation", async () => {
@@ -157,9 +156,10 @@ test("verifies the Slack bot token before binding the installation", async () =>
     assert.equal(options.signal.aborted, false);
     return Response.json(identity);
   };
-  assert.equal(await verifySlackBot(token, installation, request), "UBOT");
+  await verifySlackBot(token, installation, request);
   for (const [result, code] of [
     [{ team_id: "TOTHER" }, "slack_installation_mismatch"],
+    [{ user_id: "UOTHERBOT" }, "slack_installation_mismatch"],
     [{ app_id: "AOTHER" }, "slack_installation_mismatch"],
     [{ is_enterprise_install: true }, "slack_installation_mismatch"],
     [{ bot_id: undefined }, "slack_bot_token_invalid"],
@@ -170,6 +170,10 @@ test("verifies the Slack bot token before binding the installation", async () =>
   }
   await assert.rejects(() => verifySlackBot(token, installation,
     async () => new Response("private error", { status: 503 })), { message: "slack_auth_unavailable" });
+  for (const error of ["fatal_error", "internal_error", "org_login_required", "service_unavailable", "team_added_to_org"]) {
+    await assert.rejects(() => verifySlackBot(token, installation,
+      async () => Response.json({ ok: false, error })), { message: "slack_auth_unavailable" });
+  }
   for (const response of [
     new Response(null, { status: 429, headers: { "retry-after": "4" } }),
     Response.json({ ok: false, error: "ratelimited" }, { headers: { "retry-after": "4" } }),
@@ -184,13 +188,17 @@ test("configuration rejects empty credentials, bad database URLs and excess conc
   const env = {
     DATABASE_URL: "postgresql://localhost/test", SLACK_APP_ID: installation.appId,
     SLACK_TEAM_ID: installation.teamId, SLACK_SIGNING_SECRET: secret, SLACK_BOT_TOKEN: token,
+    SLACK_BOT_USER_ID: installation.botUserId,
   };
   assert.equal(readConfig(env).concurrency, 4);
+  assert.equal(readConfig(env).botUserId, installation.botUserId);
   assert.equal(readConfig(env).filesEnabled, true);
   assert.equal(readConfig({ ...env, SLACK_FILES_ENABLED: "true" }).filesEnabled, true);
   assert.equal(readConfig({ ...env, SLACK_FILES_ENABLED: "false" }).filesEnabled, false);
   assert.throws(() => readConfig({ ...env, SLACK_FILES_ENABLED: "yes" }), /SLACK_FILES_ENABLED/);
   assert.throws(() => readConfig({ ...env, SLACK_BOT_TOKEN: "" }), /SLACK_BOT_TOKEN/);
+  assert.throws(() => readConfig({ ...env, SLACK_BOT_USER_ID: undefined }), /SLACK_BOT_USER_ID/);
+  assert.throws(() => readConfig({ ...env, SLACK_BOT_USER_ID: "BBOT" }), /SLACK_BOT_USER_ID/);
   assert.throws(() => readConfig({ ...env, WORKER_CONCURRENCY: "9" }), /WORKER_CONCURRENCY/);
   assert.throws(() => readConfig({ ...env, DATABASE_URL: "postgresql://[invalid" }), /DATABASE_URL/);
   for (const url of ["postgresql://", "postgresql:///"]) {

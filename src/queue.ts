@@ -43,7 +43,7 @@ export class Queue {
     }
   }
 
-  async initialize(schema: string, installation: Installation): Promise<void> {
+  async initialize(schema: string, installation: Pick<Installation, "appId" | "teamId">): Promise<void> {
     await this.transaction(async (client) => {
       await client.query("SELECT pg_advisory_xact_lock(714391432, 1)");
       await client.query(schema);
