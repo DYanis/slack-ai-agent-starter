@@ -22,6 +22,9 @@ async function generateReply(
       if (error instanceof Error && error.message === "slack_files_rate_limited") {
         return "Slack is limiting file downloads right now. Please try again later.";
       }
+      if (error instanceof Error && error.message === "slack_files_missing_scope") {
+        return "I need permission to read Slack files. Ask the app owner to grant files:read and reinstall the app.";
+      }
       return "I couldn't read all the attached files. Upload up to three files directly to this Slack conversation, with a total size of 8 MiB or less. If that still fails, ask the app owner to check file access.";
     }
   } else if (!text.trim()) {

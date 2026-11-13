@@ -70,6 +70,9 @@ export function createSlackFileLoader(token: string, request: typeof fetch = fet
       if (data?.ok === false && (data.error === "ratelimited" || data.error === "rate_limited")) {
         deferFiles(response);
       }
+      if (data?.ok === false && data.error === "missing_scope") {
+        throw new Error("slack_files_missing_scope");
+      }
       const file = asRecord(data?.file);
       if (data?.ok !== true || !file || file.id !== id ||
           (file.mode !== "hosted" && file.mode !== "snippet") ||

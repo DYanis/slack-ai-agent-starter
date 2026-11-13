@@ -1,12 +1,12 @@
 # Slack AI Agents Starter
 
-A TypeScript starter for building Slack AI agents on Railway. Each deployment runs one Slack app with a private PostgreSQL database. You can use a demo reply to check Slack delivery, then connect OpenAI, Claude, or Gemini using service variables.
+A TypeScript starter for building Slack AI agents on Railway. Each deployment runs one Slack app with a private PostgreSQL database. You can use a demo reply to check Slack delivery, then connect OpenAI, Claude, or Gemini using service variables. With a model connected, the app sends supported files attached to direct messages and channel mentions to that provider by default.
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/slack-ai-agent-starter)
 
 ## Set up an agent
 
-1. Create and install a Slack app for one workspace. Use [slack-manifest.yaml](slack-manifest.yaml) as a starting point. Remove the `event_subscriptions` block before importing it so Slack does not need a Request URL yet.
+1. Create and install a Slack app for one workspace. Use [slack-manifest.yaml](slack-manifest.yaml) as a starting point. Remove the `event_subscriptions` block before importing it so Slack does not need a Request URL yet. Grant the optional `files:read` permission to handle attachments.
 2. Copy the signing secret from **Basic Information** and the bot token from **OAuth & Permissions**. Use the IDs of that same Slack app and workspace.
 3. Open the Railway template, fill in the required Slack variables, and deploy. It creates the app service and a private PostgreSQL service with a persistent volume. Use a separate deployment and database for each Slack app. Set `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` to `55` on the app service before using it, then wait for `/health/ready` to return HTTP 200.
 4. In Slack, turn on **Event Subscriptions** for `app_mention` and `message.im`. Use your Railway public HTTPS URL followed by `/slack/events` as the Request URL and confirm Slack verifies it. Reinstall if Slack requests it. Make sure the App Home **Messages** tab lets users send messages.
@@ -20,7 +20,7 @@ A TypeScript starter for building Slack AI agents on Railway. Each deployment ru
 | `SLACK_TEAM_ID` | The ID of the one allowed workspace. |
 | `SLACK_SIGNING_SECRET` | The signing secret for that app. Store it as a Railway secret. |
 | `SLACK_BOT_TOKEN` | The installed bot token for that app and workspace. Store it as a Railway secret. |
-| `SLACK_FILES_ENABLED` | Accept and download files attached to eligible Slack messages. Defaults to `false`. |
+| `SLACK_FILES_ENABLED` | Send supported attachments to the selected AI provider. Defaults to `true`. Set to `false` for text only. |
 | `WORKER_CONCURRENCY` | Concurrent work across separate threads. Default 4, range 1 to 8. |
 | `PORT` | Defaults to 3000 and matches the template's public HTTP port. |
 
@@ -36,19 +36,21 @@ A TypeScript starter for building Slack AI agents on Railway. Each deployment ru
 | `claude` | `claude-haiku-4-5` | `ANTHROPIC_API_KEY` (key scoped to one Claude workspace) |
 | `gemini` | `gemini-3.5-flash-lite` | `GEMINI_API_KEY` |
 
-The selected provider receives the current Slack message text and the configured instructions. Add your own conversation history if your agent needs context across replies. The included providers generate plain text without tools. The app gives a model up to 22 seconds to reply, or 14 seconds after downloading an attachment, within the worker's 25-second deadline.
+The selected provider receives the current Slack message text, configured instructions, and supported attachments when file processing is enabled. Add your own conversation history if your agent needs context across replies. The included providers generate plain text without tools. The app gives a model up to 22 seconds to reply, or 14 seconds after downloading an attachment, within the worker's 25-second deadline.
 
 For custom integrations, make your own copy of the repository and use the `Agent` contract in [src/agent.ts](src/agent.ts). Return a plain text reply and pass the provided abort signal to provider calls. The worker may retry generation after a restart. Protect external writes with their own approval and duplicate prevention.
 
 ## Accept files
 
-1. Deploy version `0.2.0` or newer. Add the `files:read` bot scope in Slack and reinstall the app. Check that the service uses the bot token from that installation.
-2. Set `SLACK_FILES_ENABLED=true` on your app service or in your local `.env`. Keep the same `app_mention` and `message.im` subscriptions.
-3. Attach a file to a message that mentions the bot, or send the file in a direct message to the bot. Demo mode confirms how many files it received. A file can be sent alone in a direct message.
+1. Grant the `files:read` bot scope in Slack. If you add it to an installed app, reinstall the app and use the bot token from that installation. Keep the same `app_mention` and `message.im` subscriptions.
+2. Keep `SLACK_FILES_ENABLED=true` to send supported attachments to the selected provider. Set it to `false` in the Railway service or local `.env` to turn file processing off. If you are updating an older installation with `false` saved in Railway, set it to `true` to enable files.
+3. Attach a file to a message that mentions the bot, or send it in a direct message to the bot. Include a question to guide the reply. If you send only a file, the bot asks the model to summarize it. Demo mode reports the number of files it received.
 
-The worker accepts up to three Slack-hosted uploads or text snippets with a combined size of 8 MiB per message. It checks that each file is still shared in that conversation before downloading from Slack. If any file cannot be read, the bot asks the sender to try again with accessible files. The queue holds file IDs until the reply is saved or the job ends. Downloaded bytes stay in memory during processing.
+The worker accepts up to three Slack-hosted uploads or text snippets with a combined size of 8 MiB per message. It checks that each file is still shared in that conversation before downloading it. The queue holds file IDs until the reply is saved or the job ends. Downloaded bytes stay in memory during processing.
 
-The three built-in model integrations use only the message text. To have the model read file content, paste the relevant text into the message. A custom agent receives optional `input.files`, each with a name, MIME type, and raw bytes. Treat the file and its metadata as untrusted. An agent that opens archives or sends files to a model needs its own content, extraction, and data handling limits.
+The built-in integrations accept PDF, JPEG, PNG, WebP, and UTF-8 plain text, Markdown, CSV, TSV, and JSON. Text attachments have a combined limit of 64 KiB. Claude images have a 7.5 MB limit per image before encoding. Choose a model that supports images and PDFs if you need those formats. The bot asks for a supported set if any attachment is unavailable, too large, or in an unsupported format. Files are included directly in the model request.
+
+A custom agent receives optional `input.files`, each with a name, MIME type, and raw bytes. Treat the file and its metadata as untrusted. An agent that opens archives or sends files to a model needs its own content, extraction, and data handling limits.
 
 ## Run locally
 

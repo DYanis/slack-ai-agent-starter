@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { once } from "node:events";
 import { test } from "node:test";
-import { respond } from "../dist/agent.js";
+import { createAgent, respond } from "../dist/agent.js";
+import { readConfig } from "../dist/config.js";
 import { createHttpServer } from "../dist/http.js";
 import { createSlackFileLoader } from "../dist/slack-files.js";
 import { postSlackReply } from "../dist/slack.js";
@@ -96,7 +97,7 @@ test("redirects and missing scope cannot deliver file content", async () => {
     return Response.json({ ok: false, error: "missing_scope" });
   });
   await assert.rejects(() => noScope(channelId, [fileId], new AbortController().signal),
-    /slack_file_unavailable/);
+    /slack_files_missing_scope/);
 });
 
 test("limits file count, combined bytes and actual streamed bytes", async () => {
@@ -161,52 +162,84 @@ test("cancels a download when the generation budget is aborted", async () => {
   await assert.rejects(running, { name: "AbortError" });
 });
 
-test("signed HTTP file-only DM reaches the agent and replies in the original thread", async (t) => {
+test("signed Slack attachments reach the selected model and replies stay in the original threads", async (t) => {
+  const config = readConfig({
+    DATABASE_URL: "postgresql://localhost/agent", SLACK_APP_ID: installation.appId,
+    SLACK_TEAM_ID: installation.teamId, SLACK_SIGNING_SECRET: secret, SLACK_BOT_TOKEN: token,
+    AI_PROVIDER: "openai", AI_MODEL: "fixture-model", OPENAI_API_KEY: "fixture-key",
+  });
   const pending = [];
   const server = createHttpServer({
-    installation, signingSecret: secret, filesEnabled: true, ready: async () => {}, wake: () => {},
+    installation, signingSecret: secret, filesEnabled: config.filesEnabled, ready: async () => {}, wake: () => {},
     enqueue: async (input) => { pending.push(input); return true; },
   }).listen(0, "127.0.0.1");
   t.after(() => new Promise((resolve) => server.close(resolve)));
   await once(server, "listening");
   const threadTs = "1700000000.000001";
-  const message = JSON.stringify({
-    type: "event_callback", team_id: installation.teamId, api_app_id: installation.appId,
-    event_id: "EvFileOnly", event: {
-      type: "message", subtype: "file_share", channel: channelId, channel_type: "im", user: "UEXAMPLE",
-      ts: "1700000000.000002", thread_ts: threadTs, files: [{ id: fileId }],
-    },
-  });
   const timestamp = String(Math.floor(Date.now() / 1000));
-  const signature = createHmac("sha256", secret).update(`v0:${timestamp}:`).update(message).digest("hex");
-  const send = (body) => fetch(`http://127.0.0.1:${server.address().port}/slack/events`, {
-    method: "POST", body, headers: {
-      "x-slack-signature": `v0=${signature}`, "x-slack-request-timestamp": timestamp,
-    },
-  });
-  assert.equal((await send(message + " ")).status, 401);
-  assert.equal((await send(message)).status, 200);
-  assert.equal(pending.length, 1);
-  assert.deepEqual(pending[0].fileIds, [fileId]);
+  async function send(eventId, event, tamper = false) {
+    const message = JSON.stringify({
+      type: "event_callback", team_id: installation.teamId, api_app_id: installation.appId,
+      event_id: eventId, event: {
+        user: "UEXAMPLE", ts: "1700000000.000002", thread_ts: threadTs,
+        files: [{ id: fileId }], ...event,
+      },
+    });
+    const signature = createHmac("sha256", secret).update(`v0:${timestamp}:`).update(message).digest("hex");
+    return fetch(`http://127.0.0.1:${server.address().port}/slack/events`, {
+      method: "POST", body: tamper ? message + " " : message, headers: {
+        "x-slack-signature": `v0=${signature}`, "x-slack-request-timestamp": timestamp,
+      },
+    });
+  }
+  const dm = { type: "message", subtype: "file_share", channel: channelId, channel_type: "im" };
+  const channel = { type: "app_mention", channel: "CEXAMPLE", text: "<@UBOT> Explain the file." };
+  assert.equal((await send("EvTampered", dm, true)).status, 401);
+  assert.equal((await send("EvUnmentioned", { ...channel, type: "message", channel_type: "channel" })).status, 200);
+  assert.equal((await send("EvFileOnly", dm)).status, 200);
+  assert.equal((await send("EvMention", channel)).status, 200);
+  assert.deepEqual(pending.map(({ eventId, fileIds }) => ({ eventId, fileIds })), [
+    { eventId: "EvFileOnly", fileIds: [fileId] }, { eventId: "EvMention", fileIds: [fileId] },
+  ]);
 
   const load = createSlackFileLoader(token, async (url) =>
-    String(url) === metadataUrl ? fileResponse() : new Response("hello"));
+    String(url) === metadataUrl ? fileResponse({ channels: ["CEXAMPLE"] }) : new Response("hello"));
+  const prompts = [];
+  const agent = createAgent(config.model, async (url, options) => {
+    assert.equal(url, "https://api.openai.com/v1/responses");
+    assert.equal(options.headers.authorization, "Bearer fixture-key");
+    const [message] = JSON.parse(options.body).input;
+    assert.equal(message.role, "user");
+    assert.deepEqual(message.content[1], { type: "input_text", text: "File: example.txt\nhello" });
+    prompts.push(message.content[0].text);
+    return Response.json({
+      status: "completed", output: [{
+        type: "message", role: "assistant", content: [{ type: "output_text", text: "I read the file." }],
+      }],
+    });
+  });
   const delivered = [];
-  let result;
-  await processJob({
+  const queue = {
     reserveSend: async () => true,
-    finishSend: async (_job, receipt) => { result = receipt; },
-    generationFailed: async () => assert.fail("the file should reach the agent"),
-  }, { ...pending[0], attemptId: "local-fixture", reply: null }, async (input, signal) => {
-    assert.equal("fileIds" in input, false);
-    assert.equal(input.files[0].bytes.toString(), "hello");
-    return respond(input, signal);
-  }, (job, reply) => postSlackReply(token, job, reply, async (_url, options) => {
-    delivered.push(JSON.parse(options.body));
-    return Response.json({ ok: true, channel: channelId, ts: "1700000000.000003" });
-  }), load);
-  assert.equal(result.kind, "delivered");
-  assert.equal(delivered.length, 1);
-  assert.equal(delivered[0].thread_ts, threadTs);
-  assert.match(delivered[0].text, /received 1 file/);
+    finishSend: async (_job, receipt) => { assert.equal(receipt.kind, "delivered"); },
+    generationFailed: async () => assert.fail("the file should reach the model"),
+  };
+  for (const input of pending) {
+    await processJob(queue, { ...input, attemptId: "local-fixture", reply: null }, agent,
+      (job, reply) => postSlackReply(token, job, reply, async (_url, options) => {
+        delivered.push(JSON.parse(options.body));
+        return Response.json({ ok: true, channel: job.channelId, ts: "1700000000.000003" });
+      }), load);
+  }
+  assert.deepEqual(prompts, ["Summarize the attached files.", channel.text]);
+  assert.deepEqual(delivered.map(({ channel, thread_ts, text }) => [channel, thread_ts, text]), [
+    [channelId, threadTs, "I read the file."], ["CEXAMPLE", threadTs, "I read the file."],
+  ]);
+});
+
+test("demo reports the file count without calling a model", async () => {
+  const signal = new AbortController().signal;
+  const [file] = await createSlackFileLoader(token, async (url) =>
+    String(url) === metadataUrl ? fileResponse() : new Response("hello"))(channelId, [fileId], signal);
+  assert.match(await respond({ files: [file] }, signal), /received 1 file/);
 });

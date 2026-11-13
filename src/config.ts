@@ -54,7 +54,7 @@ export function readConfig(env: NodeJS.ProcessEnv) {
   } catch {
     throw new Error("Invalid DATABASE_URL");
   }
-  const filesEnabled = env.SLACK_FILES_ENABLED ?? "false";
+  const filesEnabled = env.SLACK_FILES_ENABLED ?? "true";
   if (filesEnabled !== "true" && filesEnabled !== "false") {
     throw new Error("Invalid SLACK_FILES_ENABLED");
   }
