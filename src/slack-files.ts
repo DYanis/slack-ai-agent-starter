@@ -29,8 +29,9 @@ function fileShare(file: Record<string, unknown>, message: SlackFileMessage): "a
     return share?.ts === message.messageTs &&
       (share.thread_ts === undefined || share.thread_ts === message.threadTs);
   }))) return "attached";
-  // Slack sometimes lists DM membership without a detailed share on the message.
-  if (message.channelId.startsWith("D") && entries.every((item) => item === undefined) &&
+  // Slack can omit DM shares or return only part of the share list.
+  const partialShares = file.has_more_shares === true || file.skipped_shares === true;
+  if (message.channelId.startsWith("D") && (partialShares || entries.every((item) => item === undefined)) &&
       Array.isArray(file.ims) && file.ims.includes(message.channelId)) return "check_dm";
   return "unconfirmed";
 }

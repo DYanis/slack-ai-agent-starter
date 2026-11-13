@@ -133,6 +133,30 @@ test("checks the exact DM message once for files with only DM share metadata", a
   }
 });
 
+test("a partial Slack share list cannot hide or substitute the exact DM attachment", async () => {
+  const signal = new AbortController().signal;
+  for (const flag of ["has_more_shares", "skipped_shares"]) {
+    let currentId = fileId;
+    let downloads = 0;
+    const load = createSlackFileLoader(token, async (url) => {
+      if (String(url) === metadataUrl) return fileResponse({
+        shares: { private: { [channelId]: [{ ts: fileMessage.threadTs }] } },
+        ims: [channelId], [flag]: true,
+      });
+      if (url.origin + url.pathname === repliesUrl) return Response.json({
+        ok: true, messages: [{ type: "message", ts: fileMessage.messageTs, files: [{ id: currentId }] }],
+      });
+      assert.equal(String(url), fileUrl);
+      downloads++;
+      return new Response("hello");
+    });
+    assert.equal((await load(fileMessage, [fileId], signal))[0].bytes.toString(), "hello");
+    currentId = "FOTHER";
+    await assert.rejects(() => load(fileMessage, [fileId], signal), /slack_file_share_unconfirmed/);
+    assert.equal(downloads, 1);
+  }
+});
+
 test("does not download a DM file when the exact message no longer contains it", async () => {
   const attached = { type: "message", ts: fileMessage.messageTs, files: [{ id: fileId }] };
   const signal = new AbortController().signal;
