@@ -6,7 +6,6 @@ services:
       DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD to a random hex value}@postgres:5432/agent
       SLACK_APP_ID: ${SLACK_APP_ID:?Set the app ID}
       SLACK_TEAM_ID: ${SLACK_TEAM_ID:?Set the workspace ID}
-      SLACK_BOT_USER_ID: ${SLACK_BOT_USER_ID:?Set the bot member ID}
       SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:?Set the signing secret}
       SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:?Set the installed bot token}
       SLACK_FILES_ENABLED: ${SLACK_FILES_ENABLED:-true}

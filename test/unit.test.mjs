@@ -146,41 +146,75 @@ test("uses the verified bot user to reject explicit authorization mismatches and
   assert.equal(parseSlackEvent(enterpriseMember, installation).kind, "input");
 });
 
-test("verifies the Slack bot token before binding the installation", async () => {
-  const identity = { ok: true, user_id: "UBOT", bot_id: "BBOT", team_id: installation.teamId };
-  const request = async (url, options) => {
-    assert.equal(url, "https://slack.com/api/auth.test");
-    assert.equal(options.method, "POST");
-    assert.equal(options.headers.authorization, `Bearer ${token}`);
-    assert.equal(options.redirect, "error");
-    assert.equal(options.signal.aborted, false);
-    return Response.json(identity);
-  };
-  await verifySlackBot(token, installation, request);
-  for (const [result, code] of [
+const botAuth = { ok: true, user_id: installation.botUserId, bot_id: "BBOT", team_id: installation.teamId };
+const botInfo = { id: botAuth.bot_id, app_id: installation.appId, user_id: installation.botUserId };
+const authUrl = "https://slack.com/api/auth.test";
+const botInfoUrl = "https://slack.com/api/bots.info?bot=BBOT";
+
+test("uses the Slack token to confirm the configured workspace and exact app", async () => {
+  for (const bot of [botInfo, { ...botInfo, user_id: undefined }]) {
+    const calls = [];
+    const verified = await verifySlackBot(token, installation, async (url, options) => {
+      const address = String(url);
+      calls.push([address, options.method, options.signal]);
+      assert.equal(options.headers.authorization, `Bearer ${token}`);
+      assert.equal(options.redirect, "error");
+      assert.equal(options.signal.aborted, false);
+      if (address === authUrl) return Response.json(botAuth);
+      assert.equal(address, botInfoUrl);
+      return Response.json({ ok: true, bot });
+    });
+    assert.equal(verified, installation.botUserId);
+    assert.deepEqual(calls.map(([url, method]) => [url, method]), [[authUrl, "POST"], [botInfoUrl, "GET"]]);
+    assert.equal(calls[0][2], calls[1][2]);
+  }
+  for (const [change, message] of [
     [{ team_id: "TOTHER" }, "slack_installation_mismatch"],
-    [{ user_id: "UOTHERBOT" }, "slack_installation_mismatch"],
-    [{ app_id: "AOTHER" }, "slack_installation_mismatch"],
     [{ is_enterprise_install: true }, "slack_installation_mismatch"],
     [{ bot_id: undefined }, "slack_bot_token_invalid"],
+    [{ user_id: undefined }, "slack_bot_token_invalid"],
     [{ ok: false, error: "invalid_auth" }, "slack_bot_token_invalid"],
   ]) {
-    await assert.rejects(() => verifySlackBot(token, installation,
-      async () => Response.json({ ...identity, ...result })), { message: code });
+    let calls = 0;
+    await assert.rejects(() => verifySlackBot(token, installation, async () => {
+      calls++;
+      return Response.json({ ...botAuth, ...change });
+    }), { message });
+    assert.equal(calls, 1);
   }
-  await assert.rejects(() => verifySlackBot(token, installation,
-    async () => new Response("private error", { status: 503 })), { message: "slack_auth_unavailable" });
-  for (const error of ["fatal_error", "internal_error", "org_login_required", "service_unavailable", "team_added_to_org"]) {
-    await assert.rejects(() => verifySlackBot(token, installation,
-      async () => Response.json({ ok: false, error })), { message: "slack_auth_unavailable" });
-  }
-  for (const response of [
-    new Response(null, { status: 429, headers: { "retry-after": "4" } }),
-    Response.json({ ok: false, error: "ratelimited" }, { headers: { "retry-after": "4" } }),
+});
+
+test("rejects the wrong app ID even with a correct token in the same workspace", async () => {
+  for (const change of [
+    { app_id: "AOTHER" }, { app_id: undefined }, { id: "BOTHER" }, { user_id: "UOTHER" }, { deleted: true },
   ]) {
-    await assert.rejects(() => verifySlackBot(token, installation, async () => response), {
-      message: "slack_auth_unavailable", retryAfterSeconds: 4,
-    });
+    await assert.rejects(() => verifySlackBot(token, installation, async (url) => String(url) === authUrl
+      ? Response.json(botAuth)
+      : Response.json({ ok: true, bot: { ...botInfo, ...change } })), { message: "slack_installation_mismatch" });
+  }
+  const wrongConfig = { ...installation, appId: "AWRONG" };
+  await assert.rejects(() => verifySlackBot(token, wrongConfig, async (url) => String(url) === authUrl
+    ? Response.json(botAuth)
+    : Response.json({ ok: true, bot: botInfo })), { message: "slack_installation_mismatch" });
+  await assert.rejects(() => verifySlackBot(token, installation, async (url) => String(url) === authUrl
+    ? Response.json(botAuth)
+    : Response.json({ ok: false, error: "missing_scope" })), { message: "slack_identity_scope_missing" });
+});
+
+test("keeps temporary Slack identity failures and rate limits retryable at either endpoint", async () => {
+  const failures = [
+    [() => new Response("private error", { status: 503 }), { message: "slack_auth_unavailable" }],
+    ...["fatal_error", "internal_error", "org_login_required", "service_unavailable", "team_added_to_org"]
+      .map((error) => [() => Response.json({ ok: false, error }), { message: "slack_auth_unavailable" }]),
+    [() => new Response(null, { status: 429, headers: { "retry-after": "4" } }),
+      { message: "slack_auth_unavailable", retryAfterSeconds: 4 }],
+    [() => Response.json({ ok: false, error: "ratelimited" }, { headers: { "retry-after": "4" } }),
+      { message: "slack_auth_unavailable", retryAfterSeconds: 4 }],
+  ];
+  for (const [response, error] of failures) {
+    await assert.rejects(() => verifySlackBot(token, installation, async () => response()), error);
+    await assert.rejects(() => verifySlackBot(token, installation, async (url) => String(url) === authUrl
+      ? Response.json(botAuth) : response()), error);
   }
 });
 
@@ -188,17 +222,13 @@ test("configuration rejects empty credentials, bad database URLs and excess conc
   const env = {
     DATABASE_URL: "postgresql://localhost/test", SLACK_APP_ID: installation.appId,
     SLACK_TEAM_ID: installation.teamId, SLACK_SIGNING_SECRET: secret, SLACK_BOT_TOKEN: token,
-    SLACK_BOT_USER_ID: installation.botUserId,
   };
   assert.equal(readConfig(env).concurrency, 4);
-  assert.equal(readConfig(env).botUserId, installation.botUserId);
   assert.equal(readConfig(env).filesEnabled, true);
   assert.equal(readConfig({ ...env, SLACK_FILES_ENABLED: "true" }).filesEnabled, true);
   assert.equal(readConfig({ ...env, SLACK_FILES_ENABLED: "false" }).filesEnabled, false);
   assert.throws(() => readConfig({ ...env, SLACK_FILES_ENABLED: "yes" }), /SLACK_FILES_ENABLED/);
   assert.throws(() => readConfig({ ...env, SLACK_BOT_TOKEN: "" }), /SLACK_BOT_TOKEN/);
-  assert.throws(() => readConfig({ ...env, SLACK_BOT_USER_ID: undefined }), /SLACK_BOT_USER_ID/);
-  assert.throws(() => readConfig({ ...env, SLACK_BOT_USER_ID: "BBOT" }), /SLACK_BOT_USER_ID/);
   assert.throws(() => readConfig({ ...env, WORKER_CONCURRENCY: "9" }), /WORKER_CONCURRENCY/);
   assert.throws(() => readConfig({ ...env, DATABASE_URL: "postgresql://[invalid" }), /DATABASE_URL/);
   for (const url of ["postgresql://", "postgresql:///"]) {

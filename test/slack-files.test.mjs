@@ -342,7 +342,6 @@ test("signed Slack attachments reach the selected model and replies stay in the 
   const config = readConfig({
     DATABASE_URL: "postgresql://localhost/agent", SLACK_APP_ID: installation.appId,
     SLACK_TEAM_ID: installation.teamId, SLACK_SIGNING_SECRET: secret, SLACK_BOT_TOKEN: token,
-    SLACK_BOT_USER_ID: installation.botUserId,
     AI_PROVIDER: "openai", AI_MODEL: "fixture-model", OPENAI_API_KEY: "fixture-key",
   });
   const pending = [];

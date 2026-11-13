@@ -8,13 +8,12 @@ Run your own Slack AI agent on Railway with OpenAI, Claude, or Gemini. Set the m
 
 You need a Railway account and permission to install an app in your Slack workspace. You can check Slack delivery in demo mode before adding an AI key.
 
-1. Open [Your Apps](https://api.slack.com/apps) and choose **Create New App → From an app manifest**. Select your workspace, paste [slack-manifest.yaml](slack-manifest.yaml), and install the app. Grant the optional `files:read` permission if you want the bot to read attachments.
-2. Copy the five Slack settings from the same app installation.
+1. Open [Your Apps](https://api.slack.com/apps) and choose **Create New App → From an app manifest**. Select your workspace, paste [slack-manifest.yaml](slack-manifest.yaml), and install the app. The manifest includes `users:read` so startup can check which app the token belongs to. Grant the optional `files:read` permission if you want the bot to read attachments.
+2. Copy the four Slack settings from the same app installation.
    - In **Basic Information**, copy the **App ID** and **Signing Secret**.
    - In **OAuth & Permissions**, copy the **Bot User OAuth Token**, which begins with `xoxb-`.
    - Find the [workspace ID](https://slack.com/help/articles/221769328-Locate-your-Slack-URL-or-ID) starting with `T` in your Slack channel URL. If your browser shows an Enterprise organization ID starting with `E`, call [Slack's auth.test API](https://docs.slack.dev/reference/methods/auth.test/) with the bot token in the Authorization header and use the returned `team_id`.
-   - Open the bot's Slack profile and choose **More → Copy member ID** for `SLACK_BOT_USER_ID`. It starts with `U` or `W`.
-3. Open the Railway template, enter the five Slack values below, and deploy. Leave `AI_PROVIDER` blank for a demo reply. On the app service, copy the HTTPS domain under **Settings → Public Networking**. If you do not see one, choose **Generate Domain** on port `3000`. Wait for `/health/ready` at that domain to return HTTP 200.
+3. Open the Railway template, enter the four Slack values below, and deploy. Leave `AI_PROVIDER` blank for a demo reply. On the app service, copy the HTTPS domain under **Settings → Public Networking**. If you do not see one, choose **Generate Domain** on port `3000`. Wait for `/health/ready` at that domain to return HTTP 200.
 4. In the Slack app settings, open **Event Subscriptions** and turn on **Enable Events**. Enter the Railway HTTPS domain followed by `/slack/events` as the **Request URL**. Wait for Slack to verify it. Under **Subscribe to bot events**, add `app_mention` and `message.im`, then save. Reinstall if Slack asks and update the Railway token if it changed.
 5. Invite the bot to an ordinary test channel and mention it. Also send the bot a direct message from its **Messages** tab. A demo reply in both threads confirms that Slack can deliver events and the bot can reply. Continue with [Connect an AI model](#connect-an-ai-model).
 
@@ -23,7 +22,6 @@ You need a Railway account and permission to install an app in your Slack worksp
 | `DATABASE_URL` | Set by the template to the Postgres service's private connection URL. |
 | `SLACK_APP_ID` | The Slack app ID shown under Basic Information. |
 | `SLACK_TEAM_ID` | The ID of the one allowed workspace. |
-| `SLACK_BOT_USER_ID` | The member ID copied from the bot's Slack profile. Startup checks the token against this ID and the workspace ID. |
 | `SLACK_SIGNING_SECRET` | The signing secret for that app. Store it as a Railway secret. |
 | `SLACK_BOT_TOKEN` | The installed bot token for that app and workspace. Store it as a Railway secret. |
 | `SLACK_FILES_ENABLED` | Send supported attachments to the selected AI provider. Defaults to `true`. Set to `false` for text only. |
@@ -32,7 +30,7 @@ You need a Railway account and permission to install an app in your Slack worksp
 
 Use a separate app service and database for each Slack installation. The template sets up the private database connection and the shutdown grace period.
 
-If you update an older deployment, add `SLACK_BOT_USER_ID` to its service variables before deploying v0.4.0.
+Before updating an older deployment to v0.4.0, add the `users:read` bot scope in Slack, reinstall the app, and update the token in Railway if it changed.
 
 ## Connect an AI model
 
@@ -70,7 +68,8 @@ A custom agent receives optional `input.files`, each with a name, MIME type, and
 | --- | --- |
 | Slack cannot verify the Request URL | Confirm that Railway reports the service ready. Check the public HTTPS domain, the `/slack/events` path, and the signing secret. |
 | Slack verifies the URL but the bot is silent | Check the app and workspace IDs and use the bot token from that app's installation. Confirm both bot events are saved and the bot is invited to the channel. Use a local workspace channel or a direct message. |
-| The service reports `slack_installation_mismatch` or `slack_bot_token_invalid` | Check the bot member ID, workspace ID, and token. Copy them from the same app installation in the workspace. |
+| The service reports `slack_installation_mismatch` or `slack_bot_token_invalid` | Check the app ID, workspace ID, and token. Copy them from the same app installation in the workspace. |
+| The service reports `slack_identity_scope_missing` | Grant the `users:read` bot scope, reinstall the app, and update the token if it changed. |
 | The service reports `slack_auth_unavailable` | Check that the Railway service can reach `slack.com` and retry the deployment when Slack is available. |
 | The service reports `database_installation_mismatch` | Use the original Slack app and workspace IDs with this database. Use a separate database when setting up a different installation. |
 | Text works but files do not | Grant `files:read`, reinstall if needed, and check that `SLACK_FILES_ENABLED=true`. Send a fresh supported file with `@bot` or in a direct message. |

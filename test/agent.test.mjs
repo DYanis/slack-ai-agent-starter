@@ -7,7 +7,6 @@ const slackEnv = {
   DATABASE_URL: "postgresql://localhost:5432/agent",
   SLACK_APP_ID: "AEXAMPLE",
   SLACK_TEAM_ID: "TEXAMPLE",
-  SLACK_BOT_USER_ID: "UBOT",
   SLACK_SIGNING_SECRET: "exampleSignSecret",
   SLACK_BOT_TOKEN: "xoxb-example",
 };

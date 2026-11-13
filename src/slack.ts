@@ -31,21 +31,21 @@ export class SlackAuthUnavailable extends Error {
   }
 }
 
-const temporarySlackAuthErrors = new Set([
-  "fatal_error", "internal_error", "org_login_required", "service_unavailable", "team_added_to_org",
+const invalidSlackAuthErrors = new Set([
+  "account_inactive", "invalid_auth", "not_allowed_token_type", "not_authed", "token_expired", "token_revoked",
 ]);
 
-export async function verifySlackBot(
-  token: string, installation: Installation, request: typeof fetch = fetch,
-): Promise<void> {
+async function readSlackIdentity(
+  url: string | URL, method: "GET" | "POST", token: string, signal: AbortSignal, request: typeof fetch,
+): Promise<Record<string, unknown>> {
   let response: Response;
   let data: Record<string, unknown> | undefined;
   try {
-    response = await request("https://slack.com/api/auth.test", {
-      method: "POST",
+    response = await request(url, {
+      method,
       redirect: "error",
       headers: { authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(3000),
+      signal,
     });
     if (response.ok) {
       data = asRecord(await response.json());
@@ -59,19 +59,36 @@ export async function verifySlackBot(
   if (response.status === 429 || data?.error === "ratelimited" || data?.error === "rate_limited") {
     throw new SlackAuthUnavailable(retryAfter(response.headers));
   }
-  if (!response.ok || typeof data?.ok !== "boolean" ||
-      (typeof data.error === "string" && temporarySlackAuthErrors.has(data.error))) {
-    throw new SlackAuthUnavailable();
+  if (response.ok && data?.ok === true) return data;
+  if (data?.error === "missing_scope") throw new Error("slack_identity_scope_missing");
+  if (data?.error === "bot_not_found") throw new Error("slack_installation_mismatch");
+  if (typeof data?.error === "string" && invalidSlackAuthErrors.has(data.error)) {
+    throw new Error("slack_bot_token_invalid");
   }
-  if (!data.ok) throw new Error("slack_bot_token_invalid");
+  throw new SlackAuthUnavailable();
+}
+
+export async function verifySlackBot(
+  token: string, installation: Pick<Installation, "appId" | "teamId">, request: typeof fetch = fetch,
+): Promise<string> {
+  const signal = AbortSignal.timeout(4000);
+  const data = await readSlackIdentity("https://slack.com/api/auth.test", "POST", token, signal, request);
   if (typeof data.user_id !== "string" || !/^[UW][A-Z0-9]+$/.test(data.user_id) ||
       typeof data.bot_id !== "string" || !/^B[A-Z0-9]+$/.test(data.bot_id)) {
     throw new Error("slack_bot_token_invalid");
   }
-  if (data.team_id !== installation.teamId || data.user_id !== installation.botUserId ||
-      data.is_enterprise_install === true || (data.app_id !== undefined && data.app_id !== installation.appId)) {
+  if (data.team_id !== installation.teamId || data.is_enterprise_install === true) {
     throw new Error("slack_installation_mismatch");
   }
+  // auth.test identifies the bot and workspace. bots.info binds that bot to its app.
+  const url = new URL("https://slack.com/api/bots.info");
+  url.searchParams.set("bot", data.bot_id);
+  const bot = asRecord((await readSlackIdentity(url, "GET", token, signal, request)).bot);
+  if (!bot || bot.deleted === true || bot.id !== data.bot_id || bot.app_id !== installation.appId ||
+      (bot.user_id !== undefined && bot.user_id !== data.user_id)) {
+    throw new Error("slack_installation_mismatch");
+  }
+  return data.user_id;
 }
 
 export function hasFreshSignatureHeaders(timestamp: string, signature: string, now = Date.now()): boolean {

@@ -63,7 +63,6 @@ export function readConfig(env: NodeJS.ProcessEnv) {
     databaseUrl,
     appId: required("SLACK_APP_ID", /^A[A-Z0-9]+$/),
     teamId: required("SLACK_TEAM_ID", /^T[A-Z0-9]+$/),
-    botUserId: required("SLACK_BOT_USER_ID", /^[UW][A-Z0-9]+$/),
     signingSecret: required("SLACK_SIGNING_SECRET", /^[A-Za-z0-9]+$/),
     botToken: required("SLACK_BOT_TOKEN", /^xoxb-[A-Za-z0-9-]+$/),
     model: readModelConfig(),
