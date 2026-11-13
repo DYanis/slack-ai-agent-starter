@@ -1,6 +1,6 @@
-# Slack AI Agent Starter
+# Slack AI Agents Starter
 
-A TypeScript starter for building a Slack AI agent on Railway. It runs one HTTP service and background worker with a private PostgreSQL database. The included agent returns a fixed setup reply so you can verify Slack delivery before connecting a model.
+A TypeScript starter for building Slack AI agents on Railway. Each deployment runs one Slack app with a private PostgreSQL database. You can use a demo reply to check Slack delivery, then connect OpenAI, Claude, or Gemini using service variables.
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/template/slack-ai-agent-starter)
 
@@ -11,7 +11,7 @@ A TypeScript starter for building a Slack AI agent on Railway. It runs one HTTP 
 3. Open the Railway template, fill in the required Slack variables, and deploy. It creates the app service and a private PostgreSQL service with a persistent volume. Use a separate deployment and database for each Slack app. Set `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` to `55` on the app service before using it, then wait for `/health/ready` to return HTTP 200.
 4. In Slack, turn on **Event Subscriptions** for `app_mention` and `message.im`. Use your Railway public HTTPS URL followed by `/slack/events` as the Request URL and confirm Slack verifies it. Reinstall if Slack requests it. Make sure the App Home **Messages** tab lets users send messages.
 5. Invite the bot to a test channel and mention it. Also send it a direct message. It should reply in each thread. If it does not, check that the token is from the same Slack app and workspace, that the app has `chat:write`, and that it joined the test channel. `/health/ready` checks database access.
-6. To add your model, make your own copy of the repository and point your Railway service at that copy. Replace `respond` in [src/agent.ts](src/agent.ts). Return a plain-text reply and pass the provided abort signal to provider calls. The worker may retry generation after a restart. Put any tool that writes to another system behind its own durable idempotency check and approval flow.
+6. To enable AI replies, configure a provider in the app service. You can do this after the Slack delivery check.
 
 | Variable | Meaning |
 | --- | --- |
@@ -24,19 +24,35 @@ A TypeScript starter for building a Slack AI agent on Railway. It runs one HTTP 
 | `WORKER_CONCURRENCY` | Concurrent work across separate threads. Default 4, range 1 to 8. |
 | `PORT` | Defaults to 3000 and matches the template's public HTTP port. |
 
+## Connect an AI model
+
+1. In the Railway project, open the app service and select **Variables**. Set `AI_PROVIDER` and `AI_MODEL`. Use a text model ID available to your account.
+2. Add the API key for the selected provider and seal the variable in Railway. Set `AI_INSTRUCTIONS` to tell the bot how to reply, such as `Answer in Bulgarian and use short paragraphs`. The default asks for a brief plain text reply. The service Variables editor supports multiple lines.
+3. Click **Deploy** to apply the variables and send a new Slack message. Leave `AI_PROVIDER` empty or set it to `demo` to use the built-in setup reply. A selected provider requires both its model and its key.
+
+| `AI_PROVIDER` | `AI_MODEL` example | API key variable |
+| --- | --- | --- |
+| `openai` | `gpt-6-luna` | `OPENAI_API_KEY` |
+| `claude` | `claude-haiku-4-5` | `ANTHROPIC_API_KEY` (key scoped to one Claude workspace) |
+| `gemini` | `gemini-3.5-flash-lite` | `GEMINI_API_KEY` |
+
+The selected provider receives the current Slack message text and the configured instructions. Add your own conversation history if your agent needs context across replies. The included providers generate plain text without tools. The app gives a model up to 22 seconds to reply, or 14 seconds after downloading an attachment, within the worker's 25-second deadline.
+
+For custom integrations, make your own copy of the repository and use the `Agent` contract in [src/agent.ts](src/agent.ts). Return a plain text reply and pass the provided abort signal to provider calls. The worker may retry generation after a restart. Protect external writes with their own approval and duplicate prevention.
+
 ## Accept files
 
 1. Deploy version `0.2.0` or newer. Add the `files:read` bot scope in Slack and reinstall the app. Check that the service uses the bot token from that installation.
 2. Set `SLACK_FILES_ENABLED=true` on your app service or in your local `.env`. Keep the same `app_mention` and `message.im` subscriptions.
-3. Attach a file to a message that mentions the bot, or send the file in a direct message to the bot. The sample confirms how many files it received. A file can be sent alone in a direct message.
+3. Attach a file to a message that mentions the bot, or send the file in a direct message to the bot. Demo mode confirms how many files it received. A file can be sent alone in a direct message.
 
 The worker accepts up to three Slack-hosted uploads or text snippets with a combined size of 8 MiB per message. It checks that each file is still shared in that conversation before downloading from Slack. If any file cannot be read, the bot asks the sender to try again with accessible files. The queue holds file IDs until the reply is saved or the job ends. Downloaded bytes stay in memory during processing.
 
-Your agent receives the message text and optional `input.files`, each with a name, MIME type, and bytes. Treat the file and its metadata as untrusted. The starter passes raw bytes. An agent that opens archives or sends files to a model needs to set its own content, extraction, and data handling limits.
+The three built-in model integrations use only the message text. To have the model read file content, paste the relevant text into the message. A custom agent receives optional `input.files`, each with a name, MIME type, and raw bytes. Treat the file and its metadata as untrusted. An agent that opens archives or sends files to a model needs its own content, extraction, and data handling limits.
 
 ## Run locally
 
-Copy `.env.example` to `.env`, set a random hex database password and fill in the Slack settings. Run `docker compose up --build`. The service is available at `http://localhost:3000`. Slack needs a public HTTPS URL to deliver real events.
+Copy `.env.example` to `.env`, set a random hex database password and fill in the Slack settings. Add the AI variables there if you want model replies. Run `docker compose up --build`. The service is available at `http://localhost:3000`. Slack needs a public HTTPS URL to deliver real events.
 
 Use Node.js 24 to run checks:
 
@@ -68,3 +84,8 @@ This starter uses the Slack Events API for ordinary Slack apps. Existing Slack-h
 - [Slack file downloads](https://docs.slack.dev/messaging/working-with-files/#downloading-files)
 - [Railway templates](https://docs.railway.com/templates/deploy)
 - [Railway PostgreSQL](https://docs.railway.com/databases/postgresql)
+- [Railway Variables](https://docs.railway.com/variables)
+- [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
+- [Claude Messages API](https://platform.claude.com/docs/en/api/messages/create)
+- [Claude workspace keys](https://platform.claude.com/docs/en/manage-claude/authentication#select-a-workspace)
+- [Gemini GenerateContent API](https://aistudio.google.com/api-reference/generate-content/generate-content)

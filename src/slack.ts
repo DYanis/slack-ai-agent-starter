@@ -14,6 +14,7 @@ export type Installation = { appId: string; teamId: string };
 
 const slackTimestamp = /^\d{10,12}\.\d{6}$/;
 const textLimit = 8000;
+export const maxSlackReplyLength = 4000;
 export const maxSlackFiles = 3;
 export const slackFileId = /^F[A-Z0-9]{1,64}$/;
 

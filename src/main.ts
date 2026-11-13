@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { Pool } from "pg";
-import { respond } from "./agent.js";
+import { createAgent } from "./agent.js";
 import { readConfig } from "./config.js";
 import { createHttpServer } from "./http.js";
 import { Queue } from "./queue.js";
@@ -46,7 +46,7 @@ async function start() {
     throw new Error(error instanceof Error && error.message === "database_installation_mismatch"
       ? error.message : "database_initialization_failed");
   }
-  const worker = startWorker(queue, config.concurrency, respond,
+  const worker = startWorker(queue, config.concurrency, createAgent(config.model),
     (job, reply) => postSlackReply(config.botToken, job, reply),
     config.filesEnabled ? createSlackFileLoader(config.botToken) : undefined);
   const server = createHttpServer({

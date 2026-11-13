@@ -2,6 +2,7 @@ import { addAbortListener } from "node:events";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Agent, AgentInput } from "./agent.js";
 import type { Job, Queue } from "./queue.js";
+import { maxSlackReplyLength } from "./slack.js";
 import type { Delivery } from "./slack.js";
 import type { LoadSlackFiles } from "./slack-files.js";
 
@@ -57,7 +58,7 @@ export async function processJob(
     } finally {
       onAbort[Symbol.dispose]();
     }
-    if (!reply || reply.length > 4000 || reply.includes("\0")) {
+    if (!reply || reply.length > maxSlackReplyLength || reply.includes("\0")) {
       await queue.generationFailed(job, false);
       return;
     }
